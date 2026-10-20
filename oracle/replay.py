@@ -52,3 +52,9 @@ def parse(path):
         else:
             off += 1
     return {"data": data, "blocks": found}
+
+
+if __name__ == "__main__":
+    import sys
+
+    parse(sys.argv[1] if len(sys.argv) > 1 else "games/replays/th13_udSr01.rpy")

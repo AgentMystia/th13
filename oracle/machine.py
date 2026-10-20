@@ -46,6 +46,7 @@ class Machine:
         self.stub_calls = {}
         self.log_stubs = log_stubs
         self._stub_impl = {}
+        self._overrides = {}
         self._load_image()
         self._map_runtime()
         self._setup_gdt_fs()
@@ -99,13 +100,27 @@ class Machine:
 
     # ---------- 桩实现 ----------
     def stub(self, name, fn):
-        """注册导入桩实现 fn(machine, esp) -> eax；默认桩返回 0 并记录调用。"""
+        """注册导入桩实现 fn(machine) -> eax；默认桩返回 0 并记录调用。"""
         self._stub_impl[name.lower()] = fn
+
+    def override_call(self, address, fn):
+        """内部地址覆写：EIP 到达 address 时以 fn(machine) 的返回值作为 EAX 并模拟 ret。
+        用于绕开依赖完整 Win32 线程环境的 CRT 内部函数（如 _getptd）。"""
+        self._overrides[address] = fn
 
     def _hook(self):
         def on_code(uc, address, size, user_data):
             if address == RET_MAGIC:
                 uc.emu_stop()
+                return
+            override = self._overrides.get(address)
+            if override is not None:
+                eax = override(self)
+                uc.reg_write(UC_X86_REG_EAX, eax & 0xFFFFFFFF)
+                esp = uc.reg_read(UC_X86_REG_ESP)
+                retaddr = struct.unpack("<I", uc.mem_read(esp, 4))[0]
+                uc.reg_write(UC_X86_REG_ESP, esp + 4)
+                uc.reg_write(UC_X86_REG_EIP, retaddr)
                 return
             imp = self.import_stubs.get(address)
             if imp is not None:

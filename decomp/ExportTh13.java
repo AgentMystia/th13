@@ -33,6 +33,16 @@ import java.util.Map;
 
 public class ExportTh13 extends GhidraScript {
 
+    /** 去掉逐条 append 产生的尾部逗号，使数组成为合法 JSON。 */
+    private static StringBuilder stripTrailingComma(StringBuilder sb) {
+        if (sb.lastIndexOf("]\n") == sb.length() - 2) sb.setLength(sb.length() - 2);
+        else if (sb.lastIndexOf("]") == sb.length() - 1) sb.setLength(sb.length() - 1);
+        if (sb.length() >= 2 && sb.charAt(sb.length() - 1) == '\n' && sb.charAt(sb.length() - 2) == ',') {
+            sb.setLength(sb.length() - 2);
+        }
+        return sb;
+    }
+
     private static String jsonEscape(String s) {
         StringBuilder b = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
@@ -77,7 +87,7 @@ public class ExportTh13 extends GhidraScript {
                     jsonEscape(String.valueOf(block.getType())), block.isInitialized()));
         }
         blocks.append("]\n");
-        writeFile(new File(outDir, "blocks.json"), blocks.toString());
+        writeFile(new File(outDir, "blocks.json"), stripTrailingComma(blocks).append("]\n").toString());
 
         // ---- 导入（外部符号）----
         SymbolTable st = currentProgram.getSymbolTable();
@@ -88,7 +98,7 @@ public class ExportTh13 extends GhidraScript {
             imports.append(String.format("{\"name\":\"%s\"},%n", jsonEscape(sym.getName(true))));
         }
         imports.append("]\n");
-        writeFile(new File(outDir, "imports.json"), imports.toString());
+        writeFile(new File(outDir, "imports.json"), stripTrailingComma(imports).append("]\n").toString());
         println("external symbols: " + importNames.size());
 
         // ---- 已定义字符串（定位版本号/调试名）----
@@ -109,7 +119,7 @@ public class ExportTh13 extends GhidraScript {
             }
         }
         strings.append("]\n");
-        writeFile(new File(outDir, "strings.json"), strings.toString());
+        writeFile(new File(outDir, "strings.json"), stripTrailingComma(strings).append("]\n").toString());
         println("strings: " + stringCount);
 
         // ---- 反编译 + 调用图 ----
@@ -190,7 +200,10 @@ public class ExportTh13 extends GhidraScript {
         ifc.dispose();
 
         StringBuilder functions = new StringBuilder("{\"functions\":[\n");
+        boolean firstRecord = true;
         for (Map<String, Object> rec : records) {
+            if (!firstRecord) functions.append(",\n");
+            firstRecord = false;
             functions.append("  {");
             boolean first = true;
             for (Map.Entry<String, Object> e : rec.entrySet()) {
@@ -212,7 +225,7 @@ public class ExportTh13 extends GhidraScript {
                     functions.append(String.format("\"%s\":%s", e.getKey(), arr));
                 }
             }
-            functions.append("},\n");
+            functions.append("}\n");
         }
         functions.append("]}\n");
         writeFile(new File(outDir, "functions.json"), functions.toString());

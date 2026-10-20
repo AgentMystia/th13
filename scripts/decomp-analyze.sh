@@ -3,7 +3,7 @@
 # 用法: scripts/decomp-analyze.sh [--refine]
 set -euo pipefail
 cd /work
-mkdir -p artifacts/decomp/jp
+mkdir -p artifacts/decomp/jp artifacts/decomp/project
 export MAXMEM="${MAXMEM:-6G}"
 
 PROJ_DIR=artifacts/decomp/project
