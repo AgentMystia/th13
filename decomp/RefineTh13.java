@@ -76,8 +76,11 @@ public class RefineTh13 extends GhidraScript {
         ifc.dispose();
 
         StringBuilder sb = new StringBuilder("{\"refined\":[\n");
+        boolean firstRec = true;
         for (Map<String, Object> rec : report) {
-            sb.append(String.format("  {\"address\":\"%s\",\"name\":\"%s\",\"status\":\"%s\"},%n",
+            if (!firstRec) sb.append(",\n");
+            firstRec = false;
+            sb.append(String.format("  {\"address\":\"%s\",\"name\":\"%s\",\"status\":\"%s\"}",
                     rec.get("address"), rec.get("name"), rec.get("status")));
         }
         sb.append("]}\n");
