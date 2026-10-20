@@ -1,0 +1,17 @@
+# 原版游戏与版权材料——绝不入库
+games/
+*.rpy
+*.7z
+
+# 大体积产物
+artifacts/
+
+# thtk 临时克隆与构建（用后清理）
+tools/thtk-tmp/
+
+# monorepo 独立克隆（有自己的 git）
+eagler-touhou/
+
+# 本地环境
+.env
+*.log
