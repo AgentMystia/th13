@@ -5,6 +5,8 @@ IMAGE_CI ?= localhost/th13-ci
 PODMAN  ?= podman
 DEV_UID ?= $(shell id -u)
 DEV_GID ?= $(shell id -g)
+# Dockerfile 随 ports/th13 入库（monorepo），本地与 CI 共用
+CONTAINER_DIR = eagler-touhou/ports/th13/container
 RUNFLAGS = --rm --userns=keep-id -v $(CURDIR):/work:Z -w /work
 
 .PHONY: image image-ci shell exec ci extract inventory thtk thtk-clean help
@@ -23,10 +25,10 @@ help:
 
 image:
 	$(PODMAN) build --target dev -t $(IMAGE) \
-		--build-arg DEV_UID=$(DEV_UID) --build-arg DEV_GID=$(DEV_GID) container/
+		--build-arg DEV_UID=$(DEV_UID) --build-arg DEV_GID=$(DEV_GID) $(CONTAINER_DIR)/
 
 image-ci:
-	$(PODMAN) build --target ci -t $(IMAGE_CI) container/
+	$(PODMAN) build --target ci -t $(IMAGE_CI) $(CONTAINER_DIR)/
 
 shell:
 	$(PODMAN) run $(RUNFLAGS) -it $(IMAGE)

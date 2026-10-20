@@ -5,10 +5,11 @@ set -euo pipefail
 cd /work
 mkdir -p tools/thtk-tmp
 if [ ! -d tools/thtk-tmp/thtk/.git ]; then
-    git clone --depth 1 https://github.com/thpatch/thtk tools/thtk-tmp/thtk
+    git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/thpatch/thtk tools/thtk-tmp/thtk
 fi
+rm -rf tools/thtk-tmp/build
 cmake -S tools/thtk-tmp/thtk -B tools/thtk-tmp/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build tools/thtk-tmp/build
 echo "== thtk 工具就绪 =="
 ls -1 tools/thtk-tmp/build/
-tools/thtk-tmp/build/thdat --help 2>&1 | head -3 || true
