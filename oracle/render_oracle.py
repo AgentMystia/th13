@@ -304,8 +304,9 @@ class FakeD3D:
         obj = self.ro.com.make_object(self.tex_vtable)
         self.textures[obj] = {"w": w, "h": h, "usage": usage, "fmt": fmt,
                               "pool": pool}
-        self.locked[obj] = (self.ro.game_malloc(max(w * h * 4, 0x40)),
-                            w * 4, w, h)
+        # 像素 scratch 固定小缓冲：语义捕获不读像素，w*h*4 真尺寸会烧穿
+        # bump 堆（2048² 纹理 ×多档 = 数十 MB → 敌机分配越界 unmapped）。
+        self.locked[obj] = (self.ro.game_malloc(0x1000), w * 4, w, h)
         self.stats["textures"] += 1
         self.ro.wr32(out, obj)
         return 0
@@ -315,8 +316,7 @@ class FakeD3D:
         obj = self.ro.com.make_object(self.tex_vtable)
         self.textures[obj] = {"w": w, "h": h, "usage": usage, "fmt": fmt,
                               "pool": pool}
-        self.locked[obj] = (self.ro.game_malloc(max(w * h * 4, 0x40)),
-                            w * 4, w, h)
+        self.locked[obj] = (self.ro.game_malloc(0x1000), w * 4, w, h)
         self.stats["textures"] += 1
         return obj
 
@@ -450,12 +450,14 @@ class FakeD3D:
         return 0
 
     def _tex_get_level_desc(self, mm):
+        # this = 第一个栈参（COM stdcall；曾误读 ECX → 纹理查不到回落 0×0）。
+        # D3DSURFACE_DESC 为 8 dword：fmt,type,usage,pool,msType,msQual,W(+0x18),H(+0x1c)
+        # （曾多写一个幻影 Size 字段 → W/H 错位 4 字节，精灵记录 X 维 0/0=NaN）。
         desc = self.arg(mm, 2)
-        info = self.textures.get(self.this(mm), {"w": 0, "h": 0, "fmt": 0})
-        # D3DSURFACE_DESC: fmt,type,usage,pool,size,msType,msQual,w,h
+        info = self.textures.get(self.arg(mm, 0), {"w": 0, "h": 0, "fmt": 0})
         self.uc.mem_write(desc, struct.pack(
-            "<9I", info["fmt"], 2, info.get("usage", 0),
-            info.get("pool", 0), 0, 0, 0, info["w"], info["h"]))
+            "<8I", info["fmt"], 2, info.get("usage", 0),
+            info.get("pool", 0), 0, 0, info["w"], info["h"]))
         return 0
 
     def _tex_get_surface_level(self, mm):
@@ -662,14 +664,14 @@ class D3DXStubs:
         stub("D3DXLoadSurfaceFromFileInMemory", 9, lambda mm: 0)
 
     def _d3dx_create_texture(self, mm):
-        # (dev, w, h, miplevels, usage, fmt, pool, *out)
-        dev = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 4)
-        w = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 16)
-        h = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 20)
-        usage = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 28)
-        fmt = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 32)
-        pool = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 36)
-        out = self.ro.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 32)
+        # D3DXCreateTexture(dev, w, h, mips, usage, fmt, pool, *out, *shared)——
+        # cdecl 9 参：[esp+8]=w、+0xc=h、+0x14=usage、+0x18=fmt、+0x1c=pool、
+        # +0x20=out（曾整体错位 8 字节：w/h 读成 mips/usage，纹理登记宽高失真）。
+        esp = mm.uc.reg_read(UC_X86_REG_ESP)
+        rd = self.ro.rd32
+        w, h = rd(esp + 8), rd(esp + 0xC)
+        usage, fmt, pool = rd(esp + 0x14), rd(esp + 0x18), rd(esp + 0x1C)
+        out = rd(esp + 0x20)
         obj = self.ro.d3d.make_texture_for(w, h, usage, fmt, pool)
         self.ro.wr32(out, obj)
         return 0
