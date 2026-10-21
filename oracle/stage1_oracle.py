@@ -118,8 +118,11 @@ def fmt_f(value):
 
 
 def c_int_arg(value):
-    """整型参数出口（StageEvent.cpp：printf("%d", (i32)(float)v)）——先舍入到
-    binary32 再向零截断；溢出按 x86 cvttss2si 语义回 0x80000000。"""
+    """整型参数出口：RES_INT（0x478e60）返回的已是整数值，直通；
+    浮点入参（RES_FLOAT 的 float 值）先舍入 binary32 再向零截断，
+    溢出按 x86 cvttss2si 语义回 0x80000000。"""
+    if isinstance(value, int):
+        return value
     x = f32(value)
     if x != x or x in (float("inf"), float("-inf")) or x >= 2 ** 31 or x < -(2 ** 31):
         return -0x80000000
