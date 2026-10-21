@@ -12,6 +12,11 @@ tools/thtk-tmp/
 # monorepo 独立克隆（有自己的 git）
 eagler-touhou/
 
+# 容器内工具缓存（emscripten/yt-dlp/bgpot 等，均在工作区卷内）
+.cache/
+.cache-*
+!.gitignore
+
 # 本地环境
 .env
 *.log
