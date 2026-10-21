@@ -89,10 +89,28 @@ def check_order(events, side, problems):
 
 
 def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("--")]
+    # --ulp N 的 N 是选项值，不得混入位置参数（否则参数个数误判走 usage 分支）。
+    positional = []
     ulp = 0
-    if "--ulp" in argv:
-        ulp = int(argv[argv.index("--ulp") + 1])
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--ulp":
+            if i + 1 >= len(argv):
+                print(__doc__)
+                return 2
+            try:
+                ulp = int(argv[i + 1])
+            except ValueError:
+                print(__doc__)
+                return 2
+            i += 2
+            continue
+        if argv[i].startswith("--"):
+            i += 1
+            continue
+        positional.append(argv[i])
+        i += 1
+    args = positional
     if len(args) != 2:
         print(__doc__)
         return 2
@@ -108,12 +126,16 @@ def main(argv):
                         events.append(json.loads(line))
         except (OSError, json.JSONDecodeError) as exc:
             sys.stderr.write("cannot parse %s: %s\n" % (path, exc))
+            # 输入无法解析也固定产出 RESULT（events=0；退出码 2 区别于真比对），
+            # 保证调用方末行解析稳定。
+            print("RESULT first_divergence_frame=none window=%d events=0" % WINDOW)
             return 2
         streams.append(events)
     a_events, b_events = streams
     if not a_events or not b_events:
         sys.stderr.write("empty input: %s=%d events, %s=%d events\n" % (
             args[0], len(a_events), args[1], len(b_events)))
+        print("RESULT first_divergence_frame=none window=%d events=0" % WINDOW)
         return 2
 
     problems = []
