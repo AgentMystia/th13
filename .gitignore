@@ -20,3 +20,4 @@ eagler-touhou/
 # 本地环境
 .env
 *.log
+__pycache__/
