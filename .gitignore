@@ -6,6 +6,10 @@ games/
 # 大体积产物
 artifacts/
 
+# 视觉对拍临时裁片/对比图（原版视频帧衍生物，红线 1：永不入库；
+# 会话内产物移存 artifacts/tmp-crops/，新裁片应直接生成于 artifacts/ 下）
+.tmp-crops/
+
 # thtk 临时克隆与构建（用后清理）
 tools/thtk-tmp/
 
