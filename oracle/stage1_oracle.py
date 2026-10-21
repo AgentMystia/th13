@@ -216,15 +216,23 @@ class Stage1Oracle:
         self.trace_on = True
         trace = self.trace
 
+        game_last = []
+
         def cb(uc, addr, size, ud):
             trace.append(addr)
             if len(trace) > 600:
                 del trace[:300]
+            if 0x401000 <= addr < 0x490000:
+                game_last.append(addr)
+                if len(game_last) > 40:
+                    del game_last[:20]
         self.uc.hook_add(UC_HOOK_BLOCK, cb)
 
         def unmapped(uc, access, address, size, value, ud):
             sys.stderr.write("UNMAPPED access=%d address=0x%08x size=%d EIP=0x%08x\n"
                              % (access, address, size, uc.reg_read(UC_X86_REG_EIP)))
+            sys.stderr.write("game blocks: %s\n" % " ".join(
+                "0x%08x" % a for a in game_last[-24:]))
             return False
         self.uc.hook_add(UC_HOOK_MEM_UNMAPPED, unmapped)
 
@@ -616,8 +624,9 @@ class Stage1Oracle:
         self.setup_float_stub()
         self.install_hooks()
 
+        stage_name = getattr(self, "stage_name", b"st01.ecl")
         name_buf = self.game_malloc(0x100)
-        self.uc.mem_write(name_buf, b"st01.ecl\x00")
+        self.uc.mem_write(name_buf, stage_name + b"\x00")
         ctl = self.m.call(MGR_CREATE, args=[name_buf], timeout_ms=30_000)
         if not ctl or self.rd32(DAT_MGR) != ctl:
             self.fail("enemy manager creation failed (ctl=0x%08x)" % ctl)
@@ -666,6 +675,9 @@ def main(argv):
         elif arg == "--frames":
             i += 1
             flags["--frames"] = int(argv[i])
+        elif arg == "--stage":
+            i += 1
+            flags["--stage"] = argv[i]
         else:
             positional.append(arg)
         i += 1
@@ -676,6 +688,8 @@ def main(argv):
     frames = flags.get("--frames", FRAMES)
     started = time.time()
     oracle = Stage1Oracle(exe, raw_dir, out)
+    if "--stage" in flags:
+        oracle.stage_name = flags["--stage"].encode("ascii")
     if flags["--trace"]:
         oracle.enable_trace()
     code = oracle.run(frames=frames)
