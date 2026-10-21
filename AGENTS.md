@@ -20,7 +20,7 @@
 - **事实源**：Ghidra 12.1.3 headless 导出（`artifacts/decomp/jp/functions.json` + 反编译体）。锚点登记 `web/cpp/rebuild/AddressMap.hpp`。
 - **双目标**：同一份 C++ 编译两次——Emscripten+SDL3 网页（`portable/build.mjs`）/ wasi-sdk 无头 harness（`portable/build-harness.mjs`，`node --experimental-wasi-unstable-preview1 tools/run-harness.mjs` 运行）。
 - **oracle**：Unicorn 直调原版函数（`oracle/`，`override_call` 桩内部依赖），事件流按 `docs/plans/event-contract.md` 契约逐帧逐字段比对，`RESULT first_divergence_frame=<n|none>` 是唯一裁决。**比对命令必须显式传参并先自证**（有 8 轮假 -1 的前科）。
-- **视觉**：速通视频黄金帧（`artifacts/reference/golden/`）+ 同款录像 `th13_01.rpy` 同帧导出对拍。**视频帧≠游戏帧**，必须走锚点拟合（结论：video = game + 400，斜率 1.0），禁用「秒×60」。
+- **视觉（视觉是弱项，永远只作辅助）**：一致性的主驱动是**渲染语义对齐**——UI/HUD/精灵的位置、缩放、旋转、层级、混合全部由 ANM/STD 脚本数据与原版 .data 常量**按构造决定**，不做手工摆放；原版侧经 unicorn 钩内部绘制提交函数导出每帧语义绘制清单（纹理/变换/顶点/混合/层序），与移植侧同构导出逐帧比对（同 stage1_compare 模式）。像素 diff（`visual_diff.py`）与人眼/看图仅作最终确认，不作修复依据。速通视频黄金帧仅用于锚定时间轴与终检。视频帧≠游戏帧，必须走锚点拟合（结论：video = game + 400，斜率 1.0），禁用「秒×60」。
 
 ### 数值语义纪律
 
