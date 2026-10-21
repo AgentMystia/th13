@@ -86,6 +86,18 @@ MOVE_SIGNATURES = {
     432: (1,), 433: (1,),
 }
 
+# boss_op 事件集（event-contract.md §7.3；513 无参不探，内联发）。
+# 位含义同上：1=整型参（RES_INT），0=浮点参（RES_FLOAT→c_int_arg）。
+BOSS_SIGNATURES = {
+    511: (1,),          # lifeSet（0x41d34c 整型解析）
+    512: (1,),          # setBoss slot
+    514: (1, 1, 1),     # setInterrupt {id,t1,t2,name}
+    521: (1,),          # 死亡中断标签 {id,name}
+}
+
+# 514/521 的名区尾串：标量参个数 → {len@+16+4n, name@+16+4(n+1)}。
+BOSS_NAME_SCALARS = {514: 3, 521: 1}
+
 # 移植侧 no-op 指令集（StageCommands.cpp 直接 return 0 的行为空转族）。
 NOOP_OPS = (
     [302, 303, 306, 307, 308, 313, 316, 319, 554]
@@ -140,6 +152,8 @@ class EventSink:
         self.spawns = 0
         self.moves = 0
         self.bullets = 0
+        self.kills = 0
+        self.boss_ops = 0
 
     def set_frame(self, frame):
         self.frame = frame
@@ -184,6 +198,31 @@ class EventSink:
         self.bullets += 1
         self.out.write(line + b"\n")
 
+    # ---- §7.3 回放会话事件 ----
+    def player(self, x, y, state):
+        line = (self._head("player")
+                + b',"x":%s,"y":%s,"state":%d}'
+                % (fmt_f(x).encode(), fmt_f(y).encode(), state))
+        self._bump_seq()
+        self.out.write(line + b"\n")
+
+    def kill(self, enemy, x, y):
+        line = (self._head("kill")
+                + b',"enemy":%d,"x":%s,"y":%s}'
+                % (enemy, fmt_f(x).encode(), fmt_f(y).encode()))
+        self._bump_seq()
+        self.kills += 1
+        self.out.write(line + b"\n")
+
+    def boss_op(self, enemy, op, args, name):
+        body = b",".join(b"%d" % c_int_arg(v) for v in args)
+        line = (self._head("boss_op")
+                + b',"enemy":%d,"op":%d,"args":[%s],"name":"%s"}'
+                % (enemy, op, body, name.encode("ascii", "replace")))
+        self._bump_seq()
+        self.boss_ops += 1
+        self.out.write(line + b"\n")
+
     def close(self):
         self.out.close()
 
@@ -210,6 +249,13 @@ class Stage1Oracle:
         self.stats = {"mallocs": 0, "malloc_bytes": 0, "seam": 0}
         self.trace = []
         self.trace_on = False
+        # ---- §7 回放会话状态 ----
+        self.replay = None          # replayfmt.ReplayStage
+        self.model = None           # replay_model.PlayerModel
+        self.replay_stage_index = 0
+        self.boss_serial = None     # "Boss" 例程敌机序号（on_spawn 登记）
+        self.nonspell_frame = -1    # Boss 第一非符（首条 513）帧
+        self.nonspell_seen = False
 
     def enable_trace(self):
         """基本块尾迹（诊断用；正常跑关闭）。"""
@@ -434,6 +480,18 @@ class Stage1Oracle:
             self.cur_thread = thread
             q = self.rd32(thread + 4)
             op = self.rd16(q + 4)
+            if self.replay is not None and (op in BOSS_SIGNATURES or op == 513):
+                # §7.3：boss_op 观察（仅回放会话；被动窗口流保持 v1 字节不变）。
+                # 513 无参内联直发；其余停机探参后发。
+                if op == 513:
+                    serial = self.serial_of(enemy)
+                    if serial is not None:
+                        self.on_boss_513(serial)
+                        self.sink.boss_op(serial, op, [], "")
+                else:
+                    self.probe_request = (thread, q, op)
+                    uc.emu_stop()
+                return
             if op in MOVE_SIGNATURES:
                 self.probe_request = (thread, q, op)
                 uc.emu_stop()
@@ -454,8 +512,11 @@ class Stage1Oracle:
                 # param2[5]（+0x14；实测 MapleEnemy {0,0,0,1000,0,100,…}）——按
                 # int 位模式转 f32。
                 life = f32(float(struct.unpack("<i", bytes(uc.mem_read(param2 + 20, 4)))[0]))
-                self.sink.enemy_spawn(serial, self.cstr(name_ptr), x, y, z, life,
-                                      parent)
+                routine = self.cstr(name_ptr)
+                self.sink.enemy_spawn(serial, routine, x, y, z, life, parent)
+                # §7.3：MainBoss 创建的 "Boss" 敌机（第一非符锚点）。
+                if routine == "Boss":
+                    self.boss_serial = serial
             orig_ret = self.rd32(esp)
             self.wr32(esp, SPAWN_RET)
             self.spawn_stack.append((serial, orig_ret))
@@ -512,6 +573,69 @@ class Stage1Oracle:
             return self.spawn_stack[-1][0]
         return None
 
+    # ---------- §7 回放会话 ----------
+    def on_boss_513(self, serial):
+        """Boss 敌机首条 513 = 第一非符开始帧（event-contract.md §7.3）。"""
+        if serial == self.boss_serial and not self.nonspell_seen:
+            self.nonspell_seen = True
+            self.nonspell_frame = self.frame
+
+    def live_enemies(self):
+        """mgr 链表遍历（0x418e00:11：ctl+0xB0 头节点，[node]=敌机基址、
+        [node+4]=next）。敌机基址 = 0x4183f0 返回值（enemy_serial 键）；
+        ECL 字段相对 vm（= 基址+0x11EC）：pos vm+0x44、hurtbox vm+0x110、
+        life vm+0x3f4c（整型）、flags vm+0x4030、槽号 vm+0x4040。"""
+        out = []
+        node = self.rd32(self.ctl + 0xB0)
+        for _ in range(2000):
+            if not node:
+                break
+            base = self.rd32(node)
+            nxt = self.rd32(node + 4)
+            if base:
+                out.append(base)
+            node = nxt
+        return out
+
+    def apply_shots(self):
+        """§7.2 击破写入：AABB 命中 → life(int vm+0x3f4c) 扣减；<1 标
+        0x4000000 待摘（0x418e00 下一趟摘链，与移植侧同拍）+ 清 mgr+0x5c 槽。"""
+        model = self.model
+        consumed = []
+        VM = 0x11EC
+        for shot in model.shots:
+            for base in self.live_enemies():
+                flags = self.rd32(base + VM + 0x4030)
+                if flags & 0x4000000 or flags & 0x21:  # 待摘 / 0x419a90:123 门
+                    continue
+                life = struct.unpack("<i", bytes(
+                    self.uc.mem_read(base + VM + 0x3F4C, 4)))[0]
+                if life < 1:
+                    continue
+                ex = f32(bytes(self.uc.mem_read(base + VM + 0x44, 4)))
+                ey = f32(bytes(self.uc.mem_read(base + VM + 0x48, 4)))
+                hw = f32(bytes(self.uc.mem_read(base + VM + 0x110, 4)))
+                hh = f32(bytes(self.uc.mem_read(base + VM + 0x114, 4)))
+                if not model.shot_hits(shot, ex, ey, hw, hh):
+                    continue
+                life -= int(model.SHOT_DAMAGE)
+                self.wr32(base + VM + 0x3F4C, life & 0xFFFFFFFF)
+                if life < 1:
+                    self.wr32(base + VM + 0x4030, flags | 0x4000000)
+                    slot = struct.unpack("<i", bytes(
+                        self.uc.mem_read(base + VM + 0x4040, 4)))[0]
+                    group = self.rd32(base + VM + 0x40C8)  # 512 写入槽的线程组指针
+                    if 0 <= slot < 3 and self.rd32(self.ctl + 0x5C + slot * 4) == group:
+                        self.wr32(self.ctl + 0x5C + slot * 4, 0)
+                    serial = self.enemy_serial.get(base)
+                    if serial is not None:
+                        self.sink.kill(serial, ex, ey)
+                consumed.append(shot)
+                break  # 一弹一敌（0x446870 同式：命中即耗弹）
+        if consumed:
+            dead = set(id(s) for s in consumed)
+            model.shots = [s for s in model.shots if id(s) not in dead]
+
     # ---------- 探参 ----------
     def setup_float_stub(self):
         """FLOAT_STUB: call 0x478ee0; sub esp,4; fstp dword [esp]; pop eax; ret。
@@ -536,8 +660,8 @@ class Stage1Oracle:
 
     def probe_move(self, thread, q, op):
         """在 0x41b260 入口处以同一状态探参（RNG 快照回滚，探完恢复寄存器）。
-        count/mask 直读指令头（§1.2），int/float 划分按契约 §4.2。"""
-        sig = MOVE_SIGNATURES[op]
+        count/mask 直读指令头（§1.2），int/float 划分按契约 §4.2/§7.3。"""
+        sig = MOVE_SIGNATURES.get(op) or BOSS_SIGNATURES[op]
         count = min(bytes(self.uc.mem_read(q + 0x0B, 1))[0], len(sig), 8)
         saved = self.save_regs()
         esp = self.uc.reg_read(UC_X86_REG_ESP)
@@ -596,7 +720,21 @@ class Stage1Oracle:
             self.probe_request = None
             args_resolved = self.probe_move(thread, q, op)
             enemy = self.serial_of(self.cur_enemy)
-            self.sink.enemy_move(enemy, op, args_resolved)
+            if op in MOVE_SIGNATURES:
+                self.sink.enemy_move(enemy, op, args_resolved)
+            else:
+                # §7.3 boss_op：名区尾串（0x4aab9c 式标签，NUL 截断，len-1 上限）。
+                name = ""
+                scalars = BOSS_NAME_SCALARS.get(op)
+                if scalars is not None:
+                    length = self.rd32(q + 16 + 4 * scalars)
+                    raw = bytes(uc.mem_read(q + 16 + 4 * (scalars + 1),
+                                            min(length, 64) if length else 0))
+                    name = raw.split(b"\0")[0][: max(length - 1, 0)].decode(
+                        "ascii", "replace")
+                if op == 513:
+                    self.on_boss_513(enemy)
+                self.sink.boss_op(enemy, op, [v for v, _ in args_resolved], name)
             self.probe_resume = True
             self.resume_addr = DISPATCH  # 恢复寄存器后重入分发器
             # probe_move 内部已恢复 save_regs 的现场（含 ESP/EBP/ECX）。
@@ -643,6 +781,9 @@ class Stage1Oracle:
         if not root:
             self.fail("root enemy creation failed")
 
+        if self.replay is not None:
+            return self.run_replay(frames)
+
         t_frame = time.time()
         for frame in range(1, frames):
             self.sink.set_frame(frame)
@@ -663,6 +804,64 @@ class Stage1Oracle:
                   s["mallocs"], s["malloc_bytes"] // 1024, s["seam"]))
         return 0
 
+    def run_replay(self, frames):
+        """§7 回放会话：同源输入注入 + 孪生自机模型 + 击破写入。
+
+        帧序（与 StageBattle::step 一致）：set_frame → player 事件（移动后）→
+        写 DAT_004c22c4 位置 → 发射/步进 → MGR_UPDATE → 击破写入。
+        窗口：Boss 第一非符 +300 帧、输入耗尽或 frames 上限。
+        """
+        from .replay_model import PlayerModel
+
+        stage = self.replay.stages[self.replay_stage_index]
+        sht_name = "pl%02d%s.sht" % (
+            self.replay.character, "a" if self.replay.shot_type == 0 else "b")
+        sht_path = os.path.join(self.raw_dir, sht_name)
+        if not os.path.isfile(sht_path):
+            self.fail("replay needs %s in raw dir (§7.2 speed source)" % sht_name)
+        self.model = PlayerModel(open(sht_path, "rb").read())
+        # 难度（§7.1）：DIFF = 录像 rank（th13_udSr01 = 1/Normal）。
+        self.wr32(DAT_DIFF, self.replay.rank)
+        # 初态 (0,400)（§7.2）——frame 0 装载趟的瞄准同源。
+        player = self.rd32(DAT_PLAYER)
+        self.uc.mem_write(player + 0x5B8, struct.pack("<f", self.model.x))
+        self.uc.mem_write(player + 0x5BC, struct.pack("<f", self.model.y))
+
+        total = min(frames, stage.frame_count)
+        t_frame = time.time()
+        frame = 0
+        while frame < total:
+            frame += 1
+            self.frame = frame
+            self.sink.set_frame(frame)
+            state = stage.frame(frame - 1)[0]
+            x, y = self.model.step_move(state)
+            self.sink.player(x, y, state)
+            self.uc.mem_write(player + 0x5B8, struct.pack("<f", x))
+            self.uc.mem_write(player + 0x5BC, struct.pack("<f", y))
+            self.model.step_fire(state)
+            self.drive(MGR_UPDATE, regs={"edi": self.ctl})
+            self.apply_shots()
+            if self.nonspell_seen and frame >= self.nonspell_frame + 300:
+                break
+            if frame % 300 == 0:
+                sys.stderr.write("frame %d events=%d shots=%d (%.1fs)\n" % (
+                    frame, self.sink.count, len(self.model.shots),
+                    time.time() - t_frame))
+                sys.stderr.flush()
+                t_frame = time.time()
+
+        self.sink.close()
+        s = self.stats
+        print("stage1-oracle-replay frames=%d enemies=%d events=%d "
+              "(spawn=%d move=%d bullet=%d kill=%d boss_op=%d) nonspell=%d "
+              "malloc=%d/%dKB seam=%d" % (
+                  frame, len(self.enemy_serial), self.sink.count,
+                  self.sink.spawns, self.sink.moves, self.sink.bullets,
+                  self.sink.kills, self.sink.boss_ops, self.nonspell_frame,
+                  s["mallocs"], s["malloc_bytes"] // 1024, s["seam"]))
+        return 0
+
 
 def main(argv):
     flags = {"--trace": False}
@@ -678,18 +877,39 @@ def main(argv):
         elif arg == "--stage":
             i += 1
             flags["--stage"] = argv[i]
+        elif arg == "--replay":
+            # §7 回放会话：<rpy> [--replay-stage N]；DIFF/自机/窗口按 §7.1。
+            i += 1
+            flags["--replay"] = argv[i]
+        elif arg == "--replay-stage":
+            i += 1
+            flags["--replay-stage"] = int(argv[i])
         else:
             positional.append(arg)
         i += 1
     exe = positional[0] if len(positional) > 0 else "games/th13/th13.exe"
     raw_dir = positional[1] if len(positional) > 1 else "artifacts/reference/raw"
-    out = (positional[2] if len(positional) > 2 else
-           "eagler-touhou/ports/th13/web/artifacts/wasi/stage1-oracle.jsonl")
+    default_out = ("eagler-touhou/ports/th13/web/artifacts/wasi/"
+                   + ("stage1-oracle-replay.jsonl" if "--replay" in flags
+                      else "stage1-oracle.jsonl"))
+    out = positional[2] if len(positional) > 2 else default_out
     frames = flags.get("--frames", FRAMES)
     started = time.time()
     oracle = Stage1Oracle(exe, raw_dir, out)
     if "--stage" in flags:
         oracle.stage_name = flags["--stage"].encode("ascii")
+    if "--replay" in flags:
+        from .replayfmt import ReplayFile
+        oracle.replay = ReplayFile().decode(open(flags["--replay"], "rb").read())
+        oracle.replay_stage_index = flags.get("--replay-stage", 0)
+        frames = frames if "--frames" in flags else oracle.replay.stages[
+            oracle.replay_stage_index].frame_count
+        sys.stderr.write("replay: name=%s rank=%d chara=%d shot=%d stage=%d "
+                         "frames=%d\n" % (
+                             oracle.replay.player_name, oracle.replay.rank,
+                             oracle.replay.character, oracle.replay.shot_type,
+                             oracle.replay.stages[oracle.replay_stage_index].number,
+                             frames))
     if flags["--trace"]:
         oracle.enable_trace()
     code = oracle.run(frames=frames)
