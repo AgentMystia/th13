@@ -21,3 +21,7 @@ eagler-touhou/
 .env
 *.log
 __pycache__/
+
+# 容器内工具 XDG 落脏兜底（正常应写入容器 HOME，不进工作区）
+.config/
+.local/
