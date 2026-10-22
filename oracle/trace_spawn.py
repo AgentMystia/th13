@@ -322,6 +322,8 @@ class SpawnTracer(RenderOracle):
             def make_insert(addr, nm):
                 def on_alt_insert(machine):
                     vm = machine.uc.reg_read(UC_X86_REG_EDI)
+                    if not (0x00800000 <= vm < 0x06000000):
+                        return
                     if 60 <= self.frame <= 64:
                         log("[f%d %s] %s+ script=%d layer=%d via %s\n" % (
                             self.frame, self.tag, nm,
@@ -367,6 +369,24 @@ class SpawnTracer(RenderOracle):
         self._attach_count = 0
         self._up_count = 0
 
+        def on_up_flush(machine):
+            if not (91 <= self.frame <= 92):
+                return
+            esp = machine.uc.reg_read(UC_X86_REG_ESP)
+            self._flush_seq = getattr(self, "_flush_seq", 0) + 1
+            log("[f%d] 0x4679a0 flush #%d\n" % (self.frame, self._flush_seq))
+        self.m.watch(0x004679A0, on_up_flush)
+
+        # DrawPrimitiveUP COM 槽：打参数（栈已弹：ret@esp-20，args 在 esp-16..）
+        def on_dpup(machine):
+            if not (91 <= self.frame <= 92):
+                return
+            esp = machine.uc.reg_read(UC_X86_REG_ESP)
+            args = struct.unpack("<4I", self.uc.mem_read(esp - 16, 16))
+            log("[f%d] DrawPrimitiveUP prim=%d count=%d stride=%d\n" % (
+                self.frame, args[1], args[2], args[3]))
+        self.m.watch(self.d3d.dev_slots[0x14C], on_dpup)
+
         def on_spawn_call(machine):
             self._spawn_count += 1
         self.m.watch(0x004183F0, on_spawn_call)
@@ -400,10 +420,15 @@ class SpawnTracer(RenderOracle):
         self._report_at_end = report_at_end
 
         def on_mgr_tick(machine):
-            # 0x41a8a0 敌机逐拍：dump +0x2c4/+0x40e8 回调（GirlRedA01）
+            # 0x41a8a0 敌机逐拍：dump +0x278/+0x270
             eax = machine.uc.reg_read(UC_X86_REG_EAX)
             if not (0x00800000 <= eax < 0x06000000):
                 return
+            if 91 <= self.frame <= 93 and getattr(self, "_mgr278", 0) < 8:
+                self._mgr278 = getattr(self, "_mgr278", 0) + 1
+                log("[f%d] enemy=%08x +278=%d +270=%d +78=%g\n" % (
+                    self.frame, eax, self.rd32(eax + 0x278),
+                    self.rd32(eax + 0x270), self.f32at(eax + 0x78)))
             # 敌机基址 = EAX；只看 GirlRedA01（rout 名在敌机+0x40? 用脚本名试探：
             # 直接按帧窗口 + 敌机 alive 段（0x11EC 内嵌 VM=034ecf08 ⟹ 基址 034ebd1c）
             cb = self.rd32(eax + 0x2C4)
@@ -416,9 +441,20 @@ class SpawnTracer(RenderOracle):
         self.m.watch(0x0041A8A0, on_mgr_tick)
 
         def on_dispatch(machine):
-            # 0x46a700 逐精灵分发：cur_layer==8 时 dump 判定输入
+            # 0x46a700 逐精灵分发：L8 时 dump 判定输入
             if self.d3d.cur_layer != 8:
                 return
+            if 91 <= self.frame <= 95:
+                vm = machine.uc.reg_read(UC_X86_REG_ESI)
+                if 0x00800000 <= vm < 0x06000000:
+                    log("[f%d L8 disp] vm=%08x t=%d sprite=%d s4aa=%d "
+                        "vis52b=%d flags18=%08x\n" % (
+                        self.frame, vm,
+                        struct.unpack("<i", self.uc.mem_read(vm + 0x53C, 4))[0],
+                        struct.unpack("<H", self.uc.mem_read(vm + 0x34, 2))[0],
+                        struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0],
+                        self.uc.mem_read(vm + 0x52B, 1)[0],
+                        self.rd32(vm + 0x18)))
             vm = machine.uc.reg_read(UC_X86_REG_ESI)
             if 0x00800000 <= vm < 0x06000000 and 61 <= self.frame <= 70:
                 file_ptr = self.rd32(vm + 0x30)
@@ -538,7 +574,7 @@ class SpawnTracer(RenderOracle):
         self.m.watch(0x00467350, on_up_path)
 
         def on_enqueue(machine):
-            if not (61 <= self.frame <= 62):
+            if not (91 <= self.frame <= 94):
                 return
             if self._enq_log >= 3:
                 return
