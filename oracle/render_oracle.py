@@ -1010,6 +1010,12 @@ class RenderOracle:
         self.patch_globals()
         self.install_hooks()
 
+        # 0) 战斗 gamestate 初始化（0x43bbc0，真版 0x42b990 装载序内调用）：
+        #    写视口块 gamestate+0xd8..0xe4 = (0,0,640,480)——0x467350 的 UP
+        #    裁剪直接读该块，极小环境曾恒 0 → 全部 UP 精灵被裁（"敌机不出
+        #    op"的真相）；fov（gamestate+0x54=0.5236）与设备初建同值不扰。
+        self.drive(0x0043BBC0, timeout_ms=10_000)
+
         # 1) 设备创建（先补 WinMain 的 Direct3DCreate9 调用→DAT_004dc6a4，
         #    再 0x45dc80 内部建假设备）
         d3d9_slot = next(slot for slot, imp in self.m.import_stubs.items()
