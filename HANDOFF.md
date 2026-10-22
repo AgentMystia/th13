@@ -41,6 +41,16 @@
 ## 现状病灶（主菜单）
 
 - 根因（蓝图已出）：**精灵实例化链路脚本号锚定错误**——背景/LOGO/光标/版本号精灵未创建；菜单项 label 语义待按 dump 核对。ANM 管线骨架已与 th15 同构，修的是 `TitleSceneResources` + `TitleMainMenu::update` 各 substate 的 create/interrupt 序列
+- **蓝图第二轮（agent_2697c80c，2026-10-22）关键锚定**：
+  - th15 主菜单 = **纯 ANM 脚本画面**（无 STD 场景）；标题不经 SceneDisplay
+  - th13 数据布局与 th15 不同：**bank17(title_v.anm) 只有版本号条**（锚点 256,224，layer26），**无幽香立绘**——立绘在 bank16 entry8-11 `face/pl0X/title_pl0X.png`，入场 script125-128（底锚 (144,480) 滑入），根 script129/130
+  - **背景 = 两层叠加**：森林底图 `title00a.png`（512×480 + 右半 xOffset512 拼 640，script90/91，ins_6(170)） + 红色星光 overlay `select00.png`（script92/93，ins_404(64,64,64) 压暗，ins_6(340) 高层，ins_408 224↔192 呼吸），根 script89
+  - **LOGO**：bank16 script94/95（根）→ 96（東方靈廟 sprite76 @(132,150)）、97（TEN DESIRES sprite77 3D 翻转 (448,368) scale2.5 → (132,150)）、98（闪爆）、99（复位）、100（副标题 @(360,480)）
+  - **菜单文字**：烘焙在 `title01.png` 的 128×16 字条精灵（entry0 sprite0-49），10 项 × 2 态 = script3-12（正常灰 192,192,192）与 script13-22（选中白 255,255,255），根 script0 锚点 (70,280)，子脚本 y 步距 18，label 27-31 供选中切换（与 th15 paint() 体系同构，可原样移植）
+  - **难度根 = script1**（70,312，子脚本 23-48）、**角色根 = script2**（70,312，子脚本 49-82）——th13 现状沿用 th15 的 124/125、134/135、子脚本 126/147（th13 不存在，必须重锚）
+  - **光标**：难度/角色菜单用 select01.png sprite89（14×14），script111 @(254,270) / script112 @(382,270)；高亮条 script101-110（x=-256 滑入到 32）
+  - **提示「按任意键」**：ascii bank2 script19（逐字符渲染，16 字符位循环 ins_502(script18)）
+  - **差距清单 13 项**见代理报告（portrait 用错、背景缺失、提示幕脚本号错、LOGO 缺失、版本号缺失、菜单项数/枚举错、难度/角色脚本号未锚、角色选中态子脚本错、TitleFrame 缺 demo/音乐重播/return_reason/Quit 位、TitleScene 缺屏、析构漏 bank19、Draw pass 占位、测试用合成 ANM）
 - 运行时资产错误已修：`th13.html` MEMFS 清单曾漏 `st01.std`/`st01wl.anm`/四机体 sht → 已补齐 24 项并与 `prepare-assets.mjs` 对齐（提交 `833118aa`，**强刷即过**）
 - th15 蓝图研究结论详尽（见下「蓝图落点」）
 
