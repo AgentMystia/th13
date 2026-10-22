@@ -317,6 +317,33 @@ class SpawnTracer(RenderOracle):
         self._div_log = 0
         self.m.watch(0x0046E419, on_uv_div)
 
+        for ins_addr, ins_name in ((0x0046F3F0, "f3f0"), (0x0046F540, "f540"),
+                                   (0x0046F5F0, "f5f0")):
+            def make_insert(addr, nm):
+                def on_alt_insert(machine):
+                    vm = machine.uc.reg_read(UC_X86_REG_EDI)
+                    if 60 <= self.frame <= 64:
+                        log("[f%d %s] %s+ script=%d layer=%d via %s\n" % (
+                            self.frame, self.tag, nm,
+                            struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0],
+                            self.rd32(vm + 0x24),
+                            self.call_chain(machine, 12)))
+                return on_alt_insert
+            self.m.watch(ins_addr, make_insert(ins_addr, ins_name))
+
+        def on_create(machine):
+            if self.frame > 64:
+                return
+            eax = machine.uc.reg_read(UC_X86_REG_EAX)
+            esp = machine.uc.reg_read(UC_X86_REG_ESP)
+            ret = struct.unpack("<I", self.uc.mem_read(esp, 4))[0]
+            self._creates = getattr(self, "_creates", 0) + 1
+            log("[f%d %s] 0x4243e0#%d script=%d file=%08x via %s\n" % (
+                self.frame, self.tag, self._creates, eax,
+                struct.unpack("<I", self.uc.mem_read(esp + 4, 4))[0],
+                self.func_names.get(ret, "?")))
+        self.m.watch(0x004243E0, on_create)
+
         gld_slot = self.rd32(self.d3d.tex_vtable + 0x44)
 
         def on_gld(machine):
@@ -346,6 +373,14 @@ class SpawnTracer(RenderOracle):
 
         def on_attach(machine):
             self._attach_count += 1
+            if 60 <= self.frame <= 64:
+                esi = machine.uc.reg_read(UC_X86_REG_ESI)
+                esp = machine.uc.reg_read(UC_X86_REG_ESP)
+                ret = struct.unpack("<I", self.uc.mem_read(esp, 4))[0]
+                log("[f%d %s] 0x461cb0 vm=%08x script=%d via %s\n" % (
+                    self.frame, self.tag, esi,
+                    struct.unpack("<i", self.uc.mem_read(esp + 4, 4))[0],
+                    self.func_names.get(ret, "?")))
         self.m.watch(0x00461CB0, on_attach)
 
         orig_up = self.d3d._dev_draw_primitive_up
@@ -366,7 +401,22 @@ class SpawnTracer(RenderOracle):
 
         def on_dispatch(machine):
             # 0x46a700 逐精灵分发：cur_layer==8 时 dump 判定输入
-            if self.d3d.cur_layer != 8 or self._disp_log >= 6:
+            if self.d3d.cur_layer != 8:
+                return
+            vm = machine.uc.reg_read(UC_X86_REG_ESI)
+            if 0x00800000 <= vm < 0x06000000 and 61 <= self.frame <= 70:
+                file_ptr = self.rd32(vm + 0x30)
+                data_base = self.rd32(file_ptr + 0x108) if file_ptr else 0
+                log("[f%d L8] vm=%08x t=%d sprite=%d s4aa=%d anmid=%d "
+                    "pc_off=%x file=%08x\n" % (
+                    self.frame, vm,
+                    struct.unpack("<i", self.uc.mem_read(vm + 0x53C, 4))[0],
+                    struct.unpack("<H", self.uc.mem_read(vm + 0x34, 2))[0],
+                    struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0],
+                    struct.unpack("<H", self.uc.mem_read(vm + 0x36, 2))[0],
+                    self.rd32(vm + 0x28) - data_base if data_base else 0,
+                    file_ptr))
+            if self._disp_log >= 6:
                 return
             self._disp_log += 1
             regs = {}
