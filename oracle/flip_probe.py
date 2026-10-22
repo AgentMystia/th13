@@ -62,6 +62,11 @@ def build():
                     self.flip_vm = vm
                     sys.stderr.write("FLIP-CAPTURE vm=%08x at g%d\n" % (
                         vm, self.frame))
+                if 13 <= script <= 22:
+                    key = "w%d" % script
+                    if not hasattr(self, key):
+                        setattr(self, key, vm)
+
                 if 94 <= script <= 100:
                     key = "logo%d" % script
                     if not hasattr(self, key):
@@ -73,6 +78,13 @@ def build():
             if not (self.probe_first <= self.frame <= self.probe_last):
                 return
             head = ("FLIP f%d g%d" % (self.frame - 1, self.frame))
+            if 355 <= self.frame - 1 <= 380:
+                parts = []
+                for w in range(13, 23):
+                    vm = getattr(self, "w%d" % w, 0)
+                    if vm:
+                        parts.append("w%d=%08x" % (w, self.rd32(vm + 0x528)))
+                sys.stderr.write("%s WHITE %s\n" % (head, " ".join(parts)))
             for script in range(94, 101):
                 vm = getattr(self, "logo%d" % script, 0)
                 if not vm:
