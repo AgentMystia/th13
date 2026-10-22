@@ -399,6 +399,22 @@ class SpawnTracer(RenderOracle):
             pass
         self._report_at_end = report_at_end
 
+        def on_mgr_tick(machine):
+            # 0x41a8a0 敌机逐拍：dump +0x2c4/+0x40e8 回调（GirlRedA01）
+            eax = machine.uc.reg_read(UC_X86_REG_EAX)
+            if not (0x00800000 <= eax < 0x06000000):
+                return
+            # 敌机基址 = EAX；只看 GirlRedA01（rout 名在敌机+0x40? 用脚本名试探：
+            # 直接按帧窗口 + 敌机 alive 段（0x11EC 内嵌 VM=034ecf08 ⟹ 基址 034ebd1c）
+            cb = self.rd32(eax + 0x2C4)
+            if 61 <= self.frame <= 64 and self._mgr_log < 6:
+                self._mgr_log += 1
+                log("[f%d] 0x41a8a0 enemy=%08x +2c4=%08x(%s) +40e8=%08x\n" % (
+                    self.frame, eax, cb,
+                    self.func_names.get(cb, "?"), self.rd32(eax + 0x40E8)))
+        self._mgr_log = 0
+        self.m.watch(0x0041A8A0, on_mgr_tick)
+
         def on_dispatch(machine):
             # 0x46a700 逐精灵分发：cur_layer==8 时 dump 判定输入
             if self.d3d.cur_layer != 8:
