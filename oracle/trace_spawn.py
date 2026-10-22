@@ -108,6 +108,60 @@ class SpawnTracer(RenderOracle):
         super().install_hooks()
         log = sys.stderr.write
 
+        # ---- rand() 消费计数：按 (frame, tag) 聚合，装载期 tag 细分 ----
+        self.rand_counts = {}
+
+        def on_rand(machine):
+            key = (self.frame, self.tag)
+            self.rand_counts[key] = self.rand_counts.get(key, 0) + 1
+        self.m.watch(0x0047BBA2, on_rand)
+
+        # ---- ANM RNG（0x472c90/0x472c20）：状态位置 + 调用计数 ----
+        self.anm_rng_calls = 0
+        self.anm_rng_per_frame = {}
+
+        def on_anm_rng32(machine):
+            self.anm_rng_calls += 1
+            key = self.frame
+            self.anm_rng_per_frame[key] = \
+                self.anm_rng_per_frame.get(key, 0) + 1
+            if self.anm_rng_calls <= 4:
+                esi = machine.uc.reg_read(UC_X86_REG_ESI)
+                state = struct.unpack(
+                    "<4H", self.uc.mem_read(esi, 8))
+                extra = ""
+                if self.anm_rng_calls <= 2:
+                    edi = machine.uc.reg_read(UC_X86_REG_EDI)
+                    ebx = machine.uc.reg_read(UC_X86_REG_EBX)
+                    extra = " (edi=%08x ebx=%08x)" % (edi, ebx)
+                    if (0x00200000 <= edi < 0x06000000
+                            and 0x00800000 <= ebx < 0x06000000):
+                        ins = struct.unpack("<hHhH", self.uc.mem_read(edi, 8))
+                        script = struct.unpack(
+                            "<H", self.uc.mem_read(ebx + 0x4AA, 2))[0]
+                        extra += (" vm script=%d timer53c=%d ins(op=%d "
+                                  "len=%d time=%d mask=%04x)" % (
+                                      script,
+                                      struct.unpack("<i", self.uc.mem_read(
+                                          ebx + 0x53C, 4))[0],
+                                      ins[0], ins[1], ins[2], ins[3]))
+                log("[f%d %s] anm_rng32#%d esi=%08x state=%04x,%04x "
+                    "counter=%d via %s%s\n" % (
+                        self.frame, self.tag, self.anm_rng_calls, esi,
+                        state[0], state[1],
+                        self.rd32(esi + 4),
+                        self.call_chain(machine, 16), extra))
+        self.m.watch(0x00472C90, on_anm_rng32)
+
+        def on_anm_rng16(machine):
+            esi = machine.uc.reg_read(UC_X86_REG_ESI)
+            if not hasattr(self, "_rng16_esi"):
+                self._rng16_esi = esi
+                log("[f%d %s] anm_rng16 esi=%08x state=%04x\n" % (
+                    self.frame, self.tag, esi,
+                    struct.unpack("<H", self.uc.mem_read(esi, 2))[0]))
+        self.m.watch(0x00472C20, on_anm_rng16)
+
         def on_insert_main(machine):
             import unicorn as _u
             vm = machine.uc.reg_read(UC_X86_REG_EDI)
@@ -343,6 +397,17 @@ def main(argv):
     tracer.run(frames=frames)
     sys.stderr.write("SUMMARY spawns=%d attaches=%d ups=%d\n" % (
         tracer._spawn_count, tracer._attach_count, tracer._up_count))
+    total = 0
+    lines = []
+    for (frame, tag), n in sorted(tracer.rand_counts.items(),
+                                  key=lambda kv: (kv[0][0], kv[0][1])):
+        total += n
+        lines.append("f%d %s: %d" % (frame, tag, n))
+    sys.stderr.write("RAND total=%d\n%s\n" % (total, "\n".join(lines[:40])))
+    sys.stderr.write("ANM_RNG total=%d per_frame=%s\n" % (
+        tracer.anm_rng_calls,
+        " ".join("%d:%d" % kv for kv in
+                 sorted(tracer.anm_rng_per_frame.items())[:40])))
     return 0
 
 
