@@ -33,7 +33,8 @@ import sys
 import time
 
 from unicorn import UcError
-from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_ECX,
+from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_EBX,
+                               UC_X86_REG_ECX,
                                UC_X86_REG_EDI, UC_X86_REG_EDX, UC_X86_REG_EIP,
                                UC_X86_REG_ESI, UC_X86_REG_ESP)
 
@@ -473,9 +474,11 @@ class FakeD3D:
         return self._tex_get_level_desc(mm)
 
     def _vb_lock(self, mm):
-        # (this, off, size, BYTE**, flags)
+        # (this, off, size, BYTE**, flags) —— this 取第一个栈参（COM stdcall；
+        # 曾误读 ECX → VB 查不到 → 返 0 指针 → 0x46c950 rep movsd 写 0 崩，
+        # 同 _tex_lock_rect 的前科，标题窗 0x46cb12 实证）。
         pptr = self.arg(mm, 3)
-        this = self.this(mm)
+        this = self.arg(mm, 0)
         buf, size = self.vb_data.get(this, (0, 0))
         off = self.arg(mm, 1)
         if buf:
@@ -519,9 +522,16 @@ class D3DXStubs:
             ux, uy, uz = struct.unpack("<3f", bytes(uc.mem_read(up, 12)))
             zx, zy, zz = ax - ex, ay - ey, az - ez
             zl = math.sqrt(zx * zx + zy * zy + zz * zz)
+            # 退化 |z|=0（eye==at，如标题清屏相机的默认全零视点）：真机
+            # D3DX 同样除 0——按 IEEE 0/0=nan 传播（f32/pack/JSON 均可承载，
+            # 两侧按同一语义对拍），不在桩里抛错。
+            if zl == 0.0:
+                zl = float("nan")
             zx, zy, zz = zx / zl, zy / zl, zz / zl
             xx, xy, xz = uy * zz - uz * zy, uz * zx - ux * zz, ux * zy - uy * zx
             xl = math.sqrt(xx * xx + xy * xy + xz * xz)
+            if xl == 0.0:
+                xl = float("nan")
             xx, xy, xz = xx / xl, xy / xl, xz / xl
             yx, yy, yz = zy * xz - zz * xy, zz * xx - zx * xz, zx * xy - zy * xx
             mat = [xx, yx, zx, 0.0, xy, yy, zy, 0.0,
@@ -786,7 +796,10 @@ class RenderOracle:
         for slot, imp in list(m.import_stubs.items()):
             if imp.name.lower() in ("encodepointer", "decodepointer"):
                 self.uc.mem_write(slot + 8, b"\xC3")
-                m.stub(imp.name, (lambda s: (lambda machine: s + 8))(slot))
+                # Encode/DecodePointer 均 stdcall 弹 4（曾漏弹：CRT TLS 初始化
+                # 0x47fc9f 连环调用后栈错位，ret 跳脏堆指针——标题窗实测）。
+                m.stub(imp.name, (lambda s: (lambda machine: s + 8))(slot),
+                       args_pop=4)
 
         def heap_alloc(machine):
             esp = machine.uc.reg_read(UC_X86_REG_ESP)
@@ -985,6 +998,12 @@ class RenderOracle:
         self.com.com_call(self.d3d.dev_slots[0xA8], d3d.dev_obj)  # EndScene
         self.com.com_call(self.d3d.dev_slots[0x44], d3d.dev_obj,
                           [0, 0, 0, 0])                            # Present
+        self.write_frame_line(out)
+
+    def write_frame_line(self, out):
+        """帧尾捕获落盘：纹理名解析 + seq 前置 + JSONL 一行（子类共用，
+        输出与 render_frame 原内联实现逐字节一致）。"""
+        d3d = self.d3d
         self.refresh_tex_map()
         for seq, op in enumerate(d3d.frame_ops):
             op["tex"] = self.tex_name(op["tex"])
