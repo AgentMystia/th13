@@ -78,6 +78,29 @@ def build():
             if not (self.probe_first <= self.frame <= self.probe_last):
                 return
             head = ("FLIP f%d g%d" % (self.frame - 1, self.frame))
+            # [轮7] f368-382 全 VM alpha 扫描：mgr 主池层桶头链（0x46f380 公式
+            # 头=mgr+0xf48784+L*0x5a4——f349 探针失败的桶扫在此换「全层收集后
+            # 逐桶走 next=+0x56c」并容忍失败：任何 alpha>0 且纹理=title01 的
+            # 非白条 VM 即第 11 quad 候选）。
+            if 368 <= self.frame - 1 <= 382:
+                hits = []
+                mgr = self.anm_mgr
+                for layer in range(0, 31):
+                    node = self.rd32(mgr + 0xF48784 + layer * 0x5A4)
+                    hops = 0
+                    while node and hops < 256:
+                        try:
+                            script = struct.unpack(
+                                "<H", bytes(self.uc.mem_read(node + VM_SCRIPT, 2)))[0]
+                            alpha = self.rd32(node + 0x528) >> 24
+                            if alpha > 0:
+                                hits.append((layer, script, alpha))
+                        except Exception:
+                            break
+                        node = self.rd32(node + 0x56C)
+                        hops += 1
+                sys.stderr.write("%s SCAN %s\n" % (
+                    head, " ".join("L%d/s%d/a%02x" % h for h in hits)))
             if 355 <= self.frame - 1 <= 380:
                 parts = []
                 for w in range(13, 23):
