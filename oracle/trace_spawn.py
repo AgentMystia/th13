@@ -455,17 +455,18 @@ class SpawnTracer(RenderOracle):
             # 0x46a700 逐精灵分发：L8 时 dump 判定输入
             if self.d3d.cur_layer != 8:
                 return
-            if 91 <= self.frame <= 95:
+            if 92 <= self.frame <= 95:
                 vm = machine.uc.reg_read(UC_X86_REG_ESI)
                 if 0x00800000 <= vm < 0x06000000:
+                    pos574 = self.f32at(vm + 0x574)
                     log("[f%d L8 disp] vm=%08x t=%d sprite=%d s4aa=%d "
-                        "vis52b=%d flags18=%08x\n" % (
+                        "vis52b=%d flags18=%08x p574=%.2f\n" % (
                         self.frame, vm,
                         struct.unpack("<i", self.uc.mem_read(vm + 0x53C, 4))[0],
                         struct.unpack("<H", self.uc.mem_read(vm + 0x34, 2))[0],
                         struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0],
                         self.uc.mem_read(vm + 0x52B, 1)[0],
-                        self.rd32(vm + 0x18)))
+                        self.rd32(vm + 0x18), pos574))
             vm = machine.uc.reg_read(UC_X86_REG_ESI)
             if 0x00800000 <= vm < 0x06000000 and 61 <= self.frame <= 70:
                 file_ptr = self.rd32(vm + 0x30)
