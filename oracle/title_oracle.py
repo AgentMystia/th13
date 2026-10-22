@@ -74,13 +74,33 @@ oracle 只负责：帧序编排、键态注入、被桩线程（_beginthreadex �
   （水平 ←/→，环绕，0 --左--> 3 / 3 --右--> 0 实证）——蓝图 7 不符，
   实测 4（灵梦/魔理沙/早苗/妖梦）。
 
+窗C 全链路（fullchain-draws.jsonl，1051 帧，降级拼接案）：
+  输入=窗A 主菜单段+窗B 难度/角色段（f380↓ f420↑ f470Z f530↓ f590Z
+  f650→ f710Z）→ f750 转场请求 → f751 场景7 建立+**开局装载线程体
+  0x42bf90（→0x42b990）手动补调成功**（等装载计数→注册战斗 update/
+  draw 任务 0x42cb90/0x42cba0→玩家/弹幕/敌机管理器 0x418d30(st01.ecl)
+  →pl01/st01wl/front/st01logo/bullet/astral.anm 开档装载→BGM→等
+  声音队列）→ 装载完成帧（NowLoading 屏）。
+  **f752 崩溃（未解，如实登记）**：首个战斗 update tick 0x425170 尾部
+  `if(mgr+0x590!=0)` 块 spawn script 0xab 的 VM 后把 out 写 +0x11c，
+  继而 0x42b030 以该值查 VM（0x46fb90）返回 0 后裸 +0x55c 走链崩。
+  根因候选（实证到的边界）：真机装载线程与主循环并发，战斗 update
+  首个 tick 发生在装载进行中的不同状态下；本环境装载在帧间隙原子
+  完成，f752 是装载完成后的首个 tick——时序语义无法用单线程 Unicorn
+  复刻（分片驱动线程体需指令级协作调度）。
+  降级拼接：侧1=真机帧 f1..f751（751 帧收窗到崩溃前，含装载完成帧）；
+  侧2=render_oracle 战斗窗 300 帧（**独立环境自建 boot，非同一时间轴**，
+  其不含 HUD——front.png 全程零 op，hud-capture-plan 的实证输入）。
+  帧号语义：[0..750]=真机全局帧-1；[751..1050]=战斗窗局部帧 0..299。
+
 用法（容器内 /work）：
-    python3 -m oracle.title_oracle [--window a|b] [exe] [raw_dir] [out_jsonl]
+    python3 -m oracle.title_oracle [--window a|b|c] [exe] [raw_dir] [out_jsonl]
         [--frames N] [--observe]
 默认窗A → artifacts/oracle-draws/title-draws.jsonl（600 帧）；
---window b → artifacts/oracle-draws/title-draws-b.jsonl（750 帧）。
-门禁自证三件套（两窗各自）：同参数两跑 sha256 逐字节一致 / 窗口内
-每帧 ops>0 / 总帧数=窗定义值（A=600，B=750）。
+--window b → artifacts/oracle-draws/title-draws-b.jsonl（750 帧）；
+--window c → artifacts/oracle-draws/fullchain-draws.jsonl（1051 帧）。
+门禁自证三件套（三窗各自）：同参数两跑 sha256 逐字节一致 / 窗口内
+每帧 ops>0 / 总帧数=窗定义值（A=600，B=750，C=1051）。
 """
 import json
 import os
@@ -150,7 +170,18 @@ INPUT_SCRIPT_B = {
     650: frozenset({VK_RIGHT}),
     710: frozenset({VK_Z}),
 }
+# 窗C（全链路）：A 的主菜单段 + B 的难度/角色段 → 开局装载 → 战斗。
+INPUT_SCRIPT_C = {
+    380: frozenset({VK_DOWN}),
+    420: frozenset({VK_UP}),
+    470: frozenset({VK_Z}),
+    530: frozenset({VK_DOWN}),
+    590: frozenset({VK_Z}),
+    650: frozenset({VK_RIGHT}),
+    710: frozenset({VK_Z}),
+}
 WINDOW = 600
+WINDOW_C_BATTLE = 300      # 窗C：战斗首帧起再跑的帧数
 
 # 模块级登记：输入位布局实测结论已写入模块 docstring（Z=0x01、
 # ↑=0x10、↓=0x20，确认掩码 0x102）。
@@ -167,6 +198,10 @@ class TitleOracle(RenderOracle):
         self.opening_init_done = False
         self.title_load_done = False
         self.title_enabled = False
+        self.loader_done = False         # 窗C：开局装载线程体已补调
+        self.loader_draining = False     # 窗C：装载期间声音队列排空语义
+        self.battle_first = None         # 窗C：战斗首帧（首个敌机 spawn）
+        self.spawn_count = 0
         self.inserts = []             # (帧, 池, 脚本号, 层) —— 蓝图黄金证据
         self.flags_writes = []        # 0x4be830 写入点（帧, EIP, 新值）
         self.menu_moves = []          # 0x473210 光标移动（帧, 项数, 光标, 禁用表）
@@ -223,6 +258,16 @@ class TitleOracle(RenderOracle):
         # 与 stage1/render_oracle 对 ANM 装载线程的处理同源）。cdecl 调用
         # 方自清栈（0x44c4c0: call; add esp,0x18），ret_pop=0。
         self.m.override_call(0x0047BAF0, lambda mm: 0)
+
+        # Sleep 桩：即时返回（无真实计时）。窗C 开局装载（0x42b990）尾部
+        # 有 `while (DAT_004e14c0 != 0) Sleep(0x10)`——等声音请求队列排空，
+        # 但声线程（LAB_0045fe60 CreateThread 桩死）永不排水 → 全速死自旋。
+        # 装载驱动期间以「队列已排空」语义清零（声系统缺席的等价行为）。
+        def on_sleep(mm):
+            if self.loader_draining and self.rd32(0x004E14C0):
+                self.wr32(0x004E14C0, 0)
+            return 0
+        self.m.stub("Sleep", on_sleep, args_pop=4)
 
         # 0x47fde1（CRT get-or-create ptd，FLS 版）：本环境未跑 CRT 启动，
         # [0x4c1d64] 仍是构建期 EncodePointer 密文（0xff5440cf），真实执行
@@ -319,6 +364,12 @@ class TitleOracle(RenderOracle):
                                      self.rd32(vm + 0x24)))
         self.m.watch(0x0046F3F0, on_insert_tail)
 
+        # 窗C：敌机 spawn 计数（stage1_oracle SPAWN 锚点 0x4183f0）
+        # ——战斗首帧判定的事件面证据。
+        def on_spawn(machine):
+            self.spawn_count += 1
+        self.m.watch(0x004183F0, on_spawn)
+
         # 0x473210 共享光标移动器（EAX=菜单对象：+0=光标 +8=项数
         # +0x90=禁用项表 +0xd0=环绕标志 +0xd4=禁用项数）——实测各菜单
         # 项数/光标范围/禁用项的证据源。
@@ -383,6 +434,21 @@ class TitleOracle(RenderOracle):
                 self.wr32(task + 4, self.rd32(task + 4) | 2)
                 self.wr32(0x004DF120, 1)
                 self.title_enabled = True
+        # 窗C：f751 场景 7 建立后补调开局装载线程体 0x42bf90
+        # （0x42c490 尾部 mov edi,0x42bf90 → 0x43b280 通用装载线程启动器
+        # 的目标；_beginthreadex 桩返 0 未跑）。线程体=完整战斗初始化序
+        # （等装载计数 → 注册战斗 update/draw 任务 0x42cb90/0x42cba0 →
+        # 玩家/弹幕/敌机管理器（0x418d30 st01.ecl）→ BGM → 等声音队列）。
+        if (self.window == "c" and self.loader_done is False
+                and self.frame >= 751 and self.rd32(0x004C2194)):
+            self.phase = "battle_loader"
+            self.loader_draining = True
+            ret = self.drive(0x0042BF90, timeout_ms=600_000)
+            self.loader_draining = False
+            if ret != 0:
+                self.fail("battle loader thread body ret=%08x" % ret)
+            self.load_finish()
+            self.loader_done = True
 
     # ---------- 帧驱动 ----------
     def title_frame(self, out):
@@ -474,10 +540,11 @@ class TitleOracle(RenderOracle):
         try:
             for self.frame in range(0, limit):
                 self.frame_keys = self.input_script.get(self.frame, frozenset())
+                prev_spawns = self.spawn_count
                 try:
                     self.title_frame(out)
                 except (SystemExit, UcError) as exc:
-                    # 窗B 开局转场可能触发装载崩溃：记录崩溃帧，收窗到
+                    # 开局转场/装载链在桩环境可能崩：记录崩溃帧，收窗到
                     # 崩溃前（已写盘帧保留），如实上报。
                     self.crash_frame = self.frame
                     sys.stderr.write(
@@ -485,6 +552,12 @@ class TitleOracle(RenderOracle):
                     break
                 self.scene_next.append(
                     (self.frame, self.rd32(SCENE_MGR + 0x584)))
+                if (self.window == "c" and self.battle_first is None
+                        and self.spawn_count > prev_spawns):
+                    self.battle_first = self.frame
+                    sys.stderr.write(
+                        "BATTLE-FIRST frame=%d spawns=%d\n" % (
+                            self.frame, self.spawn_count))
                 if self.observe:
                     self.observe_line()
                 if self.frame % 60 == 0:
@@ -493,6 +566,9 @@ class TitleOracle(RenderOracle):
                         time.time() - t0))
                     sys.stderr.flush()
                     t0 = time.time()
+                if (self.window == "c" and self.battle_first is not None
+                        and self.frame >= self.battle_first + WINDOW_C_BATTLE):
+                    break
         finally:
             out.close()
         return 0
@@ -562,6 +638,49 @@ class TitleOracle(RenderOracle):
                 "total_ops": sum(ops)}
 
 
+    def cut_window_c(self, battle_frames=WINDOW_C_BATTLE):
+        """窗C（降级拼接案，语义边界见模块 docstring）：
+        侧1=真机全链路帧（首个 ops>0 .. 崩溃帧前，含 f751 开局装载完成帧）
+        ——f752 首个战斗 update tick 在桩环境崩（装载线程原子化 vs 真机
+        线程并发的时序差，详见提交说明），收窗到崩溃前；
+        侧2=render_oracle 战斗窗 300 帧（独立环境自建 boot，非同一时间轴）
+        帧号顺延。帧号语义：[0..N1-1]=真机全局帧-1；[N1..N1+299]=战斗窗
+        局部帧 0..299。"""
+        rows = [json.loads(l) for l in
+                open(self.out_path, "rb").read().splitlines()]
+        first = next((i for i, r in enumerate(rows) if r["ops"]), None)
+        if first is None:
+            self.fail("no frame with ops>0")
+        end = self.crash_frame if self.crash_frame is not None else len(rows)
+        side1 = rows[first:end]
+        for i, row in enumerate(side1):
+            row["frame"] = i
+        # 侧2：战斗窗（render_oracle 独立 boot）
+        from .render_oracle import RenderOracle
+        battle_path = "artifacts/tmp-scratch/fullchain-battle-side.jsonl"
+        battle = RenderOracle("games/th13/th13.exe",
+                              "artifacts/reference/raw", battle_path)
+        battle.run(frames=battle_frames)
+        side2 = [json.loads(l) for l in
+                 open(battle_path, "rb").read().splitlines()]
+        if len(side2) < battle_frames:
+            self.fail("battle side short: %d" % len(side2))
+        for i, row in enumerate(side2[:battle_frames]):
+            row["frame"] = len(side1) + i
+        window = side1 + side2[:battle_frames]
+        with open(self.out_path, "wb") as f:
+            for row in window:
+                f.write(json.dumps(row, ensure_ascii=True,
+                                   separators=(",", ":")).encode("ascii")
+                        + b"\n")
+        ops = [len(r["ops"]) for r in window]
+        return {"prefix": first, "frames": len(window),
+                "side1": len(side1), "side2": battle_frames,
+                "crash": self.crash_frame,
+                "min_ops": min(ops), "max_ops": max(ops),
+                "total_ops": sum(ops)}
+
+
 def main(argv):
     flags = {}
     positional = []
@@ -579,11 +698,12 @@ def main(argv):
             positional.append(arg)
         i += 1
     window = flags.get("--window", "a")
-    if window not in ("a", "b"):
-        sys.stderr.write("--window must be a or b\n")
+    if window not in ("a", "b", "c"):
+        sys.stderr.write("--window must be a/b/c\n")
         return 2
-    default_out = ("artifacts/oracle-draws/title-draws.jsonl" if window == "a"
-                   else "artifacts/oracle-draws/title-draws-b.jsonl")
+    default_out = {"a": "artifacts/oracle-draws/title-draws.jsonl",
+                   "b": "artifacts/oracle-draws/title-draws-b.jsonl",
+                   "c": "artifacts/oracle-draws/fullchain-draws.jsonl"}[window]
     exe = positional[0] if positional else "games/th13/th13.exe"
     raw_dir = positional[1] if len(positional) > 1 else "artifacts/reference/raw"
     out_path = positional[2] if len(positional) > 2 else default_out
@@ -591,19 +711,24 @@ def main(argv):
 
     oracle = TitleOracle(exe, raw_dir, out_path)
     oracle.window = window
-    oracle.input_script = (INPUT_SCRIPT_A if window == "a"
-                           else INPUT_SCRIPT_B)
+    oracle.input_script = {"a": INPUT_SCRIPT_A, "b": INPUT_SCRIPT_B,
+                           "c": INPUT_SCRIPT_C}[window]
     oracle.observe = "--observe" in flags
     frames = flags.get("--frames", WINDOW)
     started = time.time()
-    oracle.run(frames=frames)
-    stats = (oracle.cut_window(frames) if window == "a"
-             else oracle.cut_window_b())
-    print("title-oracle window=%s prefix=%d frames=%d rule=%s "
+    oracle.run(frames=frames,
+               total_limit=1400 if window == "c" else None)
+    stats = {"a": oracle.cut_window, "b": oracle.cut_window_b,
+             "c": oracle.cut_window_c}[window]()
+    extra = (" side1=%d side2=%d crash=%d" % (
+        stats.get("side1", 0), stats.get("side2", 0),
+        stats.get("crash") or -1) if window == "c" else "")
+    print("title-oracle window=%s prefix=%d frames=%d rule=%s%s "
           "ops[min=%d max=%d total=%d] elapsed %.1fs" % (
               window, stats["prefix"], stats["frames"],
-              stats.get("rule", "fixed600"), stats["min_ops"],
-              stats["max_ops"], stats["total_ops"], time.time() - started))
+              stats.get("rule", "fixed600"), extra,
+              stats["min_ops"], stats["max_ops"], stats["total_ops"],
+              time.time() - started))
     if oracle.menu_moves:
         print("cursor moves (frame,count,cursor,wrap,skips): %s" % " ".join(
             "f%d:n%d c%d w%d s%s" % m for m in oracle.menu_moves))

@@ -18,7 +18,10 @@ PAGE = 0x1000
 STACK_TOP = 0x00300000
 STACK_SIZE = 0x00100000
 HEAP_BASE = 0x01000000
-HEAP_SIZE = 0x04000000
+# 128MB：原 64MB 在开局装载链（0x42b990 一串多 MB 对象，如 0x42e270
+# 一次 0x79dd04≈7.9MB）下实测溢出（bump 越过 0x05000000 读崩——窗C
+# 攻坚实证）。真机 Windows 堆远大于此，扩容即恢复语义。
+HEAP_SIZE = 0x08000000
 TEB_ADDR = 0x7FFDE000
 STUB_BASE = 0xF0000000      # 每个导入一个 16 字节桩槽
 RET_MAGIC = 0xF1000000      # call() 的哨兵返回地址
