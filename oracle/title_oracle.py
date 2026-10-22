@@ -454,6 +454,8 @@ class TitleOracle(RenderOracle):
     def title_frame(self, out):
         """一帧：0x45d2f0 真实帧序（update walk + draw walk + 捕获）。"""
         d3d = self.d3d
+        import oracle.render_oracle as _ro
+        _ro.PROBE_FRAME = self.frame  # 临时诊断探针帧号（TH13_TFACTOR_PROBE）
         self.d3d.frame_ops = []
         self.d3d.cur_layer = None
         # 0x45d2f0:30 帧首 UP 刷（ESI=mgr）→ 视口预置 → update walk

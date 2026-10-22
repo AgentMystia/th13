@@ -616,9 +616,18 @@ class Stage1Oracle:
                 ey = f32(bytes(self.uc.mem_read(base + VM + 0x48, 4)))
                 hw = f32(bytes(self.uc.mem_read(base + VM + 0x110, 4)))
                 hh = f32(bytes(self.uc.mem_read(base + VM + 0x114, 4)))
+                import os as _os
+                if _os.environ.get("TH13_SHOT_PROBE") and self.frame <= 130:
+                    import sys as _sys
+                    serial_probe = self.enemy_serial.get(base)
+                    _sys.stderr.write(
+                        "HITCHK f=%d e=%s shot=(%.2f,%.2f) enemy=(%.2f,%.2f) "
+                        "hb=(%.2f,%.2f) hit=%s\n" % (
+                            self.frame, serial_probe, shot[0], shot[1], ex, ey,
+                            hw, hh, model.shot_hits(shot, ex, ey, hw, hh)))
                 if not model.shot_hits(shot, ex, ey, hw, hh):
                     continue
-                life -= int(model.SHOT_DAMAGE)
+                life -= int(model.shot_damage(shot))  # 每发伤害（.sht +0x18）
                 self.wr32(base + VM + 0x3F4C, life & 0xFFFFFFFF)
                 if life < 1:
                     self.wr32(base + VM + 0x4030, flags | 0x4000000)
@@ -630,6 +639,7 @@ class Stage1Oracle:
                     serial = self.enemy_serial.get(base)
                     if serial is not None:
                         self.sink.kill(serial, ex, ey)
+                        model.on_kill()  # 功率 +8（与 reward_kill 同拍）
                 consumed.append(shot)
                 break  # 一弹一敌（0x446870 同式：命中即耗弹）
         if consumed:
@@ -839,7 +849,7 @@ class Stage1Oracle:
             self.sink.player(x, y, state)
             self.uc.mem_write(player + 0x5B8, struct.pack("<f", x))
             self.uc.mem_write(player + 0x5BC, struct.pack("<f", y))
-            self.model.step_fire(state)
+            self.model.step_fire(state, frame)
             self.drive(MGR_UPDATE, regs={"edi": self.ctl})
             self.apply_shots()
             if self.nonspell_seen and frame >= self.nonspell_frame + 300:

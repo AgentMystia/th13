@@ -73,6 +73,10 @@ TS_VIEW, TS_PROJ, TS_WORLD, TS_TEX0 = 2, 3, 0x100, 0x10
 RS_SRCBLEND, RS_DESTBLEND, RS_BLENDOP = 19, 20, 171
 RS_TFACTOR = 60
 
+# 临时诊断：TFACTOR 写入↔op 交错探针（TH13_TFACTOR_PROBE=1 启用；
+# title_oracle 每帧更新 PROBE_FRAME）。
+PROBE_FRAME = -1
+
 
 def f32s(values):
     """16 元矩阵/向量 → %.9g 串（stage1 fmt_f 范式，float32 往返无损）。"""
@@ -362,6 +366,19 @@ class FakeD3D:
     def _dev_set_render_state(self, mm):
         state, value = self.arg(mm, 1), self.arg(mm, 2)
         self.renderstates[state] = value
+        # TFACTOR 写入探针（临时诊断，TH13_TFACTOR_PROBE=1 启用）：
+        # RS_TFACTOR=60（本项目实测常量）——记录帧号/值/返回地址。
+        import os
+        if state == 60 and os.environ.get("TH13_TFACTOR_PROBE"):
+            import struct as _s
+            import unicorn.x86_const as _uc
+            import sys as _sys
+            try:
+                ret = self.uc.reg_read(_uc.UC_X86_REG_ESP)
+                ra = _s.unpack("<I", bytes(self.uc.mem_read(ret, 4)))[0]
+            except Exception:
+                ra = 0
+            print(f"W f={PROBE_FRAME} value=0x{value & 0xffffffff:08x} ra=0x{ra:08x}", file=_sys.stderr)
         return 0
 
     def _dev_set_texture(self, mm):
@@ -403,6 +420,10 @@ class FakeD3D:
         }
         self.frame_ops.append(op)
         self.stats["quads"] += 1
+        import os as _os
+        if _os.environ.get("TH13_TFACTOR_PROBE"):
+            import sys as _sys
+            print(f"O f={PROBE_FRAME} quad L{op['layer']} tf=0x{op['tfactor']:08x}", file=_sys.stderr)
         return 0
 
     def _dev_draw_primitive_up(self, mm):
@@ -442,6 +463,12 @@ class FakeD3D:
         }
         self.frame_ops.append(op)
         self.stats["ups"] += 1
+        import os as _os
+        if _os.environ.get("TH13_TFACTOR_PROBE"):
+            import sys as _sys
+            vc = op["verts"][0][4] if op["verts"] else 0
+            print(f"O f={PROBE_FRAME} up L{op['layer']} tf=0x{op['tfactor']:08x} "
+                  f"vcol=0x{vc & 0xffffffff:08x}", file=_sys.stderr)
         return 0
 
     # ---------- 纹理 / VB / surface ----------
@@ -1144,7 +1171,7 @@ class RenderOracle:
             if self.frame >= 1 and self.frame <= stage.frame_count:
                 state = stage.frame(self.frame - 1)[0]
                 x, y = self.model.step_move(state)
-                self.model.step_fire(state)
+                self.model.step_fire(state, self.frame)
                 self.uc.mem_write(player + 0x5B8, struct.pack("<f", x))
                 self.uc.mem_write(player + 0x5BC, struct.pack("<f", y))
 
@@ -1205,10 +1232,11 @@ class RenderOracle:
                 hh = f32(bytes(self.uc.mem_read(base + VM + 0x114, 4)))
                 if not model.shot_hits(shot, ex, ey, hw, hh):
                     continue
-                life -= int(model.SHOT_DAMAGE)
+                life -= int(model.shot_damage(shot))  # 每发伤害（.sht +0x18）
                 self.wr32(base + VM + 0x3F4C, life & 0xFFFFFFFF)
                 if life < 1:
                     self.wr32(base + VM + 0x4030, flags | 0x4000000)
+                    model.on_kill()  # 功率 +8（与 reward_kill 同拍）
                     slot = struct.unpack("<i", bytes(
                         self.uc.mem_read(base + VM + 0x4040, 4)))[0]
                     group = self.rd32(base + VM + 0x40C8)
