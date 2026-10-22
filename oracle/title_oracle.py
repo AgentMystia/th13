@@ -74,33 +74,36 @@ oracle 只负责：帧序编排、键态注入、被桩线程（_beginthreadex �
   （水平 ←/→，环绕，0 --左--> 3 / 3 --右--> 0 实证）——蓝图 7 不符，
   实测 4（灵梦/魔理沙/早苗/妖梦）。
 
-窗C 全链路（fullchain-draws.jsonl，1051 帧，降级拼接案）：
+窗C 全链路（fullchain-draws.jsonl，**真连续窗**，十五轮升级）：
   输入=窗A 主菜单段+窗B 难度/角色段（f380↓ f420↑ f470Z f530↓ f590Z
-  f650→ f710Z）→ f750 转场请求 → f751 场景7 建立+**开局装载线程体
-  0x42bf90（→0x42b990）手动补调成功**（等装载计数→注册战斗 update/
-  draw 任务 0x42cb90/0x42cba0→玩家/弹幕/敌机管理器 0x418d30(st01.ecl)
-  →pl01/st01wl/front/st01logo/bullet/astral.anm 开档装载→BGM→等
-  声音队列）→ 装载完成帧（NowLoading 屏）。
-  **f752 崩溃（未解，如实登记）**：首个战斗 update tick 0x425170 尾部
-  `if(mgr+0x590!=0)` 块 spawn script 0xab 的 VM 后把 out 写 +0x11c，
-  继而 0x42b030 以该值查 VM（0x46fb90）返回 0 后裸 +0x55c 走链崩。
-  根因候选（实证到的边界）：真机装载线程与主循环并发，战斗 update
-  首个 tick 发生在装载进行中的不同状态下；本环境装载在帧间隙原子
-  完成，f752 是装载完成后的首个 tick——时序语义无法用单线程 Unicorn
-  复刻（分片驱动线程体需指令级协作调度）。
-  降级拼接：侧1=真机帧 f1..f751（751 帧收窗到崩溃前，含装载完成帧）；
-  侧2=render_oracle 战斗窗 300 帧（**独立环境自建 boot，非同一时间轴**，
-  其不含 HUD——front.png 全程零 op，hud-capture-plan 的实证输入）。
-  帧号语义：[0..750]=真机全局帧-1；[751..1050]=战斗窗局部帧 0..299。
+  f650→ f710Z）→ f750 转场请求 → f751 场景 7 建立（0x42c490：scene7
+  对象+装载线程启动）→ **开局装载线程体 0x42bf90（→0x42b990）切片
+  驱动**：每帧一片（200k 指令预算，f751-f753 三片完成）——注册战斗
+  update/draw 任务 0x42cb90/0x42cba0、玩家/弹幕/敌机管理器
+  0x418d30(st01.ecl，屏障原子)、pl01/st01wl/front/st01logo/bullet/
+  astral.anm 开档、BGM、等声音队列；线程体**恰好跑一次**（尾部
+  0x42bf17 一次性重置 scene7+0x10 插值结构 + 0x42bf52 清 +0x60 bit2
+  装载完成位——每帧重放会令战斗初始化 ==0 分支死循环，十五轮战报）
+  → f754 首个战斗 tick（==0 创建块唯一一次：0x425170 战斗管理器族）
+  → f754 起每帧计数推进（0x42cb45 步进器）→ 敌机 spawn 时间轴与战斗
+  窗完全一致（main/MapleEnemy@0、GirlRed@60、GirlBlue@90…每 30 帧，
+  相位差恒 1=boot 前缀语义）。
+  **当前前沿（如实登记，十六轮靶）**：f1003（战斗第 250 tick）ECL
+  弹道指令 0x40db10→0x46f820（按 id 建 VM）返 0 → 0x4125b0 以
+  EAX=0 裸写崩；战斗窗 260 帧同拍从未走该路径（fullchain 特有 ECL
+  分歧，疑玩家/输入态差）。窗C 终点=f1002（1002 帧，战斗段 249 帧），
+  崩溃前沿确定性（两跑同帧）。
+  帧号语义：[i] = 真机全局帧 i+1（f0 开场创建当帧 ops=0 剥离）。
 
 用法（容器内 /work）：
     python3 -m oracle.title_oracle [--window a|b|c] [exe] [raw_dir] [out_jsonl]
         [--frames N] [--observe]
 默认窗A → artifacts/oracle-draws/title-draws.jsonl（600 帧）；
 --window b → artifacts/oracle-draws/title-draws-b.jsonl（750 帧）；
---window c → artifacts/oracle-draws/fullchain-draws.jsonl（1051 帧）。
-门禁自证三件套（三窗各自）：同参数两跑 sha256 逐字节一致 / 窗口内
-每帧 ops>0 / 总帧数=窗定义值（A=600，B=750，C=1051）。
+--window c → artifacts/oracle-draws/fullchain-draws.jsonl（1002 帧，
+受 f1003 确定性崩溃前沿约束，见上）。门禁自证三件套（三窗各自）：
+同参数两跑 sha256 逐字节一致 / 窗口内每帧 ops>0 / 总帧数=窗定义值
+（A=600，B=750，C=1002）。
 """
 import json
 import os
@@ -108,9 +111,9 @@ import struct
 import sys
 import time
 
-from unicorn import UcError
+from unicorn import UcError, UC_HOOK_CODE
 from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_EBX,
-                               UC_X86_REG_ECX,
+                               UC_X86_REG_ECX, UC_X86_REG_EDX,
                                UC_X86_REG_EDI, UC_X86_REG_EIP, UC_X86_REG_ESI,
                                UC_X86_REG_ESP)
 
@@ -181,7 +184,20 @@ INPUT_SCRIPT_C = {
     710: frozenset({VK_Z}),
 }
 WINDOW = 600
-WINDOW_C_BATTLE = 300      # 窗C：战斗首帧起再跑的帧数
+WINDOW_C_BATTLE = 300      # 窗C：战斗首帧起的目标帧数（实际受崩溃前沿约束）
+
+# ---- 窗C 屏障切片装载（真机并发装载线程的单线程等价驱动，十五轮实证） ----
+BATTLE_LOADER_BODY = 0x0042BF90   # 开局装载线程体（jmp 0x42b990 thunk）
+BARRIER_ADDR = 0x00418D30         # ECL mgr 创建（内部 0x417e20 展开不可切片）
+BATTLE_PREOPEN = ((9, "pl01.anm"), (4, "st01wl.anm"), (5, "front.anm"),
+                  (6, "st01logo.anm"), (7, "bullet.anm"), (25, "astral.anm"))
+LOADER_STACK = 0x002E1000         # 切片专用栈（主线程栈之外）
+LOADER_SLICE_INSTR = 200_000      # 每帧指令预算（f751-f753 三片完成装载）
+LOADER_REGS = ("eax", "ebx", "ecx", "edx", "esi", "ebp")
+_REG = {"eax": UC_X86_REG_EAX, "ebx": UC_X86_REG_EBX, "ecx": UC_X86_REG_ECX,
+        "edx": UC_X86_REG_EDX, "esi": UC_X86_REG_ESI, "ebp": UC_X86_REG_EBP}
+# 注意：不保存/恢复 EDI 与 x87——与十五轮验证过的切片序列一致（恢复点
+# 无存活 EDI 依赖；行为已对战斗窗等价性实证），改动保存集=行为变更风险。
 
 # 模块级登记：输入位布局实测结论已写入模块 docstring（Z=0x01、
 # ↑=0x10、↓=0x20，确认掩码 0x102）。
@@ -198,8 +214,11 @@ class TitleOracle(RenderOracle):
         self.opening_init_done = False
         self.title_load_done = False
         self.title_enabled = False
-        self.loader_done = False         # 窗C：开局装载线程体已补调
+        self.loader_done = False         # 窗C：开局装载线程体已完整返回
         self.loader_draining = False     # 窗C：装载期间声音队列排空语义
+        self._loader_state = {"eip": None, "esp": 0, "regs": None,
+                              "done": False}
+        self._barrier_atomic = False     # 屏障原子段标志（切片停机豁免）
         self.battle_first = None         # 窗C：战斗首帧（首个敌机 spawn）
         self.spawn_count = 0
         self.inserts = []             # (帧, 池, 脚本号, 层) —— 蓝图黄金证据
@@ -298,6 +317,15 @@ class TitleOracle(RenderOracle):
             self.stats["seam"] += 1
             return buf
         m.override_call(OPEN_BY_NAME, seam, ret_pop=12)
+
+        # 屏障：窗C 切片装载中，0x418d30 入口停机（其内部 0x417e20 的
+        # SCPT/ECL 程序体展开不可切片——切成两半会得到残缺 ECL 数据，
+        # 六轮实证）。停机后由 battle_loader_step 原子执行到其返回地址。
+        def _on_barrier(uc, addr, size, ud):
+            if self.loader_draining and not self._barrier_atomic:
+                uc.emu_stop()
+        self.uc.hook_add(UC_HOOK_CODE, _on_barrier,
+                         begin=BARRIER_ADDR, end=BARRIER_ADDR)
 
     def patch_globals_title(self):
         """标题窗全局：调度器按 WinMain 内联构造（0x45c110 LAB_0045c3d5 的
@@ -434,21 +462,75 @@ class TitleOracle(RenderOracle):
                 self.wr32(task + 4, self.rd32(task + 4) | 2)
                 self.wr32(0x004DF120, 1)
                 self.title_enabled = True
-        # 窗C：f751 场景 7 建立后补调开局装载线程体 0x42bf90
-        # （0x42c490 尾部 mov edi,0x42bf90 → 0x43b280 通用装载线程启动器
-        # 的目标；_beginthreadex 桩返 0 未跑）。线程体=完整战斗初始化序
-        # （等装载计数 → 注册战斗 update/draw 任务 0x42cb90/0x42cba0 →
-        # 玩家/弹幕/敌机管理器（0x418d30 st01.ecl）→ BGM → 等声音队列）。
-        if (self.window == "c" and self.loader_done is False
-                and self.frame >= 751 and self.rd32(0x004C2194)):
-            self.phase = "battle_loader"
-            self.loader_draining = True
-            ret = self.drive(0x0042BF90, timeout_ms=600_000)
-            self.loader_draining = False
-            if ret != 0:
-                self.fail("battle loader thread body ret=%08x" % ret)
+        # 窗C：f751 场景 7 建立后，开局装载线程体（0x42bf90→0x42b990）
+        # 由 run() 每帧切片驱动（见 battle_loader_step）——真机该线程与
+        # 主循环并发（注册战斗 update/draw 任务 0x42cb90/0x42cba0、开档
+        # 装载 st01.ecl/player/弹幕管理器、BGM、等声音队列），单线程
+        # 等价=指令预算切片 + 0x418d30 屏障 + 线程体一次性返回语义。
+
+    def battle_loader_step(self):
+        """窗C：开局装载线程体的每帧一片驱动（指令预算 200k）。
+
+        真机并发语义的关键两点（十五轮战报实证）：
+        1. 线程体必须完整跑且只跑一次——其尾部 0x42bf17 对 scene7+0x10
+           调 0x4016c0(0)（插值结构重置 {-1,0}）与 0x42bf52 清 scene7
+           +0x60 bit2（装载完成位）各恰好一次。若线程尾每帧重放，重置
+           会每帧清掉 0x42c550 尾部步进器（0x42cb45→0x401400）的推进，
+           战斗初始化 ==0 分支死循环（0x42ad40 每帧重入）。
+        2. 0x418d30（ECL mgr 创建）内部的 0x417e20 展开不可切片——
+           切入其中会得到残缺 ECL/SCPT 数据（六轮实证），入口屏障停机
+           后原子执行到其返回地址再恢复切片。
+        首片前经 seam 同步预开 6 个战斗 ANM（真机由装载线程异步开档，
+        切片内的 0x46df40 等待环需要文件已就绪）。"""
+        st = self._loader_state
+        if st["done"]:
+            return
+        if st["eip"] is None:
+            for slot, name in BATTLE_PREOPEN:
+                nb = self.game_malloc(0x40)
+                self.uc.mem_write(nb, name.encode("ascii") + b"\0")
+                self.drive(ANM_OPEN, regs={"eax": slot, "ecx": nb},
+                           timeout_ms=300_000)
             self.load_finish()
+            esp = LOADER_STACK
+            self.uc.mem_write(esp, struct.pack("<I", RET_MAGIC))
+            self.uc.reg_write(UC_X86_REG_ESP, esp)
+            self.uc.reg_write(UC_X86_REG_EBP, esp + 0x400)
+            for reg in LOADER_REGS:
+                self.uc.reg_write(_REG[reg], 0)
+            eip = BATTLE_LOADER_BODY
+        else:
+            eip = st["eip"]
+            self.uc.reg_write(UC_X86_REG_ESP, st["esp"])
+            for reg, val in zip(LOADER_REGS, st["regs"]):
+                self.uc.reg_write(_REG[reg], val)
+        self.phase = "battle_loader"
+        self.loader_draining = True
+        try:
+            self.uc.emu_start(eip, RET_MAGIC, timeout=120_000_000,
+                              count=LOADER_SLICE_INSTR)
+        finally:
+            self.loader_draining = False
+        now = self.uc.reg_read(UC_X86_REG_EIP)
+        if now == BARRIER_ADDR:
+            esp = self.uc.reg_read(UC_X86_REG_ESP)
+            ret_to = self.rd32(esp)
+            self._barrier_atomic = True
+            try:
+                self.uc.emu_start(now, ret_to, timeout=600_000_000)
+            finally:
+                self._barrier_atomic = False
+            now = self.uc.reg_read(UC_X86_REG_EIP)
+            if now != ret_to:
+                self.fail("battle loader barrier diverged at %08x" % now)
+        if now == RET_MAGIC:
+            st["done"] = True          # 一次性：线程体已返回，永不再驱动
             self.loader_done = True
+            self.wr32(0x004DCC30, 0)
+            return
+        st["eip"] = now
+        st["esp"] = self.uc.reg_read(UC_X86_REG_ESP)
+        st["regs"] = [self.uc.reg_read(_REG[reg]) for reg in LOADER_REGS]
 
     # ---------- 帧驱动 ----------
     def title_frame(self, out):
@@ -552,6 +634,10 @@ class TitleOracle(RenderOracle):
                     sys.stderr.write(
                         "CRASH frame=%d: %s\n" % (self.frame, exc))
                     break
+                if (self.window == "c" and not self._loader_state["done"]
+                        and self.frame >= 751
+                        and self.rd32(0x004C2194)):
+                    self.battle_loader_step()
                 self.scene_next.append(
                     (self.frame, self.rd32(SCENE_MGR + 0x584)))
                 if (self.window == "c" and self.battle_first is None
@@ -641,43 +727,43 @@ class TitleOracle(RenderOracle):
 
 
     def cut_window_c(self, battle_frames=WINDOW_C_BATTLE):
-        """窗C（降级拼接案，语义边界见模块 docstring）：
-        侧1=真机全链路帧（首个 ops>0 .. 崩溃帧前，含 f751 开局装载完成帧）
-        ——f752 首个战斗 update tick 在桩环境崩（装载线程原子化 vs 真机
-        线程并发的时序差，详见提交说明），收窗到崩溃前；
-        侧2=render_oracle 战斗窗 300 帧（独立环境自建 boot，非同一时间轴）
-        帧号顺延。帧号语义：[0..N1-1]=真机全局帧-1；[N1..N1+299]=战斗窗
-        局部帧 0..299。"""
+        """窗C（真连续窗，十五轮升级）：boot→标题→难度→角色→转场→开局
+        装载（切片驱动）→战斗，同一时间轴一次跑通，无拼接。
+        终点 = min(崩溃前沿, battle_first+目标帧数)；f0 是开场场景创建当帧
+        （ops=0，前缀帧剥离）。帧号语义：[i] = 全局帧 i+1。
+        当前前沿（十五轮，确定性）：f1003（战斗第 250 tick）ECL 弹道指令
+        0x40db10→0x46f820 返 0 → 0x4125b0 裸写崩；战斗窗 260 帧同拍未走
+        该路径（fullchain 特有分歧，十六轮靶）→ 终点 f1002，战斗段
+        f754..f1002（249 帧）。等价性（十五轮实证）：spawn 序列与战斗窗
+        完全一致（main/MapleEnemy@0、GirlRed@60、GirlBlue@90…每 30 帧，
+        相位差恒 1=boot 前缀）。"""
         rows = [json.loads(l) for l in
                 open(self.out_path, "rb").read().splitlines()]
         first = next((i for i, r in enumerate(rows) if r["ops"]), None)
         if first is None:
             self.fail("no frame with ops>0")
-        end = self.crash_frame if self.crash_frame is not None else len(rows)
-        side1 = rows[first:end]
-        for i, row in enumerate(side1):
+        end = len(rows)
+        rule = "battle+%d" % battle_frames
+        if self.battle_first is not None:
+            end = min(end, self.battle_first + battle_frames + 1)
+        if self.crash_frame is not None:
+            end = min(end, self.crash_frame)
+            rule += "+crash_cut@%d" % self.crash_frame
+        window = rows[first:end]
+        if len(window) < 10:
+            self.fail("window C too short: %d" % len(window))
+        for i, row in enumerate(window):
             row["frame"] = i
-        # 侧2：战斗窗（render_oracle 独立 boot）
-        from .render_oracle import RenderOracle
-        battle_path = "artifacts/tmp-scratch/fullchain-battle-side.jsonl"
-        battle = RenderOracle("games/th13/th13.exe",
-                              "artifacts/reference/raw", battle_path)
-        battle.run(frames=battle_frames)
-        side2 = [json.loads(l) for l in
-                 open(battle_path, "rb").read().splitlines()]
-        if len(side2) < battle_frames:
-            self.fail("battle side short: %d" % len(side2))
-        for i, row in enumerate(side2[:battle_frames]):
-            row["frame"] = len(side1) + i
-        window = side1 + side2[:battle_frames]
         with open(self.out_path, "wb") as f:
             for row in window:
                 f.write(json.dumps(row, ensure_ascii=True,
                                    separators=(",", ":")).encode("ascii")
                         + b"\n")
         ops = [len(r["ops"]) for r in window]
-        return {"prefix": first, "frames": len(window),
-                "side1": len(side1), "side2": battle_frames,
+        return {"prefix": first, "frames": len(window), "rule": rule,
+                "battle_first": self.battle_first,
+                "battle_frames": (min(end, len(rows)) - self.battle_first)
+                if self.battle_first is not None else 0,
                 "crash": self.crash_frame,
                 "min_ops": min(ops), "max_ops": max(ops),
                 "total_ops": sum(ops)}
@@ -722,9 +808,9 @@ def main(argv):
                total_limit=1400 if window == "c" else None)
     stats = {"a": oracle.cut_window, "b": oracle.cut_window_b,
              "c": oracle.cut_window_c}[window]()
-    extra = (" side1=%d side2=%d crash=%d" % (
-        stats.get("side1", 0), stats.get("side2", 0),
-        stats.get("crash") or -1) if window == "c" else "")
+    extra = (" battle_first=%s battle_frames=%d crash=%s" % (
+        stats.get("battle_first"), stats.get("battle_frames", 0),
+        stats.get("crash")) if window == "c" else "")
     print("title-oracle window=%s prefix=%d frames=%d rule=%s%s "
           "ops[min=%d max=%d total=%d] elapsed %.1fs" % (
               window, stats["prefix"], stats["frames"],
