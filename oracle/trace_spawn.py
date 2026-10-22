@@ -419,6 +419,17 @@ class SpawnTracer(RenderOracle):
             pass
         self._report_at_end = report_at_end
 
+        def on_reattach(machine):
+            # 0x419764：翻转重挂读脚本基（EDI=敌机）——f92 附近 dump 全字段
+            edi = machine.uc.reg_read(UC_X86_REG_EDI)
+            if 0x00800000 <= edi < 0x06000000 and 61 <= self.frame <= 95:
+                log("[f%d] reattach enemy=%08x +278=%d +26c=%d +270=%d "
+                    "+78=%.4g +120=%08x\n" % (
+                    self.frame, edi, self.rd32(edi + 0x278),
+                    self.rd32(edi + 0x26C), self.rd32(edi + 0x270),
+                    self.f32at(edi + 0x78), self.rd32(edi + 0x120)))
+        self.m.watch(0x00419764, on_reattach)
+
         def on_mgr_tick(machine):
             # 0x41a8a0 敌机逐拍：dump +0x278/+0x270
             eax = machine.uc.reg_read(UC_X86_REG_EAX)
