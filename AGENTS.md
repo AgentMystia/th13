@@ -63,6 +63,6 @@
 - 外层仓库（工具/脚本/oracle）与 monorepo（`eagler-touhou/`，分支 `port/th13`）各自独立提交，**提交信息用中文、分模块小提交**。
 - 容器入口：外层 `Makefile`（`make image / shell / exec-port CMD=… / thtk / thtk-clean`）；镜像 th13-dev（全工具链）/ th13-ci / th13-shot（chromium 无头取帧）。
 - 注册 th13 需三处：`launcher/config/workspace.json`、`runtime-builds.json`、`common/contracts/product-catalog.mjs`（PRODUCT_GAMES）。
-- 长程攻坚走动态工作流（`.zcode/workflow-drafts/th13-Stage-1-可玩版攻坚.dwf.ts`）；**已缓存阶段的 ask 文本一个字都不能改**（改=缓存全失效重付）；修订用 Edit+AmendWorkflow；子代理 GLM-5.3$max 有周配额，超了等重置 ResumeWorkflowRun 或用户指示换模型。
+- **交付目标导向**（用户令，2026-10-22）：一切手段服务于「真实可玩、行为一致的 th13 网页版」交付。编排按战役形态选——研究分叉为主的战役由主会话直接编排+专家子代理（主会话跑门禁、读输出、定方向）；纯机械磨轮循环（比对→修→再比对 ×N）可按需起动态工作流。用动态工作流时：**已缓存阶段的 ask 文本一个字都不能改**（改=缓存全失效重付）；修订用 Edit+AmendWorkflow；子代理 GLM-5.3$max 有周配额，超了等重置 ResumeWorkflowRun 或用户指示换模型。草稿归档在 `artifacts/workflow-drafts-archive/`。
 - **身份/文本类事实必须从数据解出**（msg 对话、ANM 名称、ECL 子程序名、strings.json），禁止凭模型记忆断言——有过子代理幻觉「一面 Boss 是幽谷响子」的前科（实为西行寺幽幽子，st01 对话原文『幽々子様』实证）。msg dump 文本是 **cp932** 编码，按 UTF-8 直读全是乱码。
 - 坑位：workflow `world.run` 的 podman `-w` 必须用容器侧路径 `/work/...`；工作流 workspace 锚定 Bash 会话 cwd（提交前先 `cd /home/mystia/项目/th13`）。
