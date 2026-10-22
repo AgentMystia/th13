@@ -524,13 +524,16 @@ class TitleOracle(RenderOracle):
     def cut_window_b(self, last_input=710, tail=90):
         """窗B：同前缀剥离；终点=场景 next(+0x584) 离开标题态 4 的帧
         （含该转场请求帧；取不到则末次输入+90），再回裁到最后一个
-        ops>0 帧（每帧有绘制的干净断点）。帧号重编 0..N-1。"""
+        ops>0 帧（每帧有绘制的干净断点）。帧号重编 0..N-1。
+        注意：scene_leave 搜索须跳过 boot 段（f0 开场 case 0 会把
+        +0x584 置 1，首个 ≠4 帧是 f0 不是转场——从 Z@470 后起搜）。"""
         rows = [json.loads(l) for l in
                 open(self.out_path, "rb").read().splitlines()]
         first = next((i for i, r in enumerate(rows) if r["ops"]), None)
         if first is None:
             self.fail("no frame with ops>0")
-        leave = next((f for f, nxt in self.scene_next if nxt != 4), None)
+        leave = next((f for f, nxt in self.scene_next
+                      if f >= 471 and nxt != 4), None)
         if leave is not None and leave >= last_input:
             end = leave + 1          # 含转场请求帧（含 crash 前最后完整帧）
             rule = "scene_leave@%d" % leave

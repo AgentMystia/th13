@@ -175,6 +175,11 @@ class FakeD3D:
         D(0x04, "AddRef", 1, lambda mm: 1)
         D(0x08, "Release", 1, lambda mm: 1)
         D(0x0C, "TestCooperativeLevel", 1, lambda mm: 0)   # 恒 OK（无设备丢失）
+        # 0x10 GetAvailableTextureMem / 0x14 EvictManagedResources：窗B
+        # f751 开局链 0x42c490（玩家数据场景创建）调 +0x14——曾缺槽致
+        # vtable 零填充 → call 0 崩（make_vtable 只填注册偏移）。
+        D(0x10, "GetAvailableTextureMem", 1, lambda mm: 0x08000000)
+        D(0x14, "EvictManagedResources", 1, lambda mm: 0)
         D(0x1C, "GetDeviceCaps", 2, self._dev_get_caps)
         D(0x40, "Reset", 2, lambda mm: 0)
         D(0x44, "Present", 5, self._dev_present)
