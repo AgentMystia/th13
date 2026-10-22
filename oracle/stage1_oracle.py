@@ -252,6 +252,7 @@ class Stage1Oracle:
         # ---- §7 回放会话状态 ----
         self.replay = None          # replayfmt.ReplayStage
         self.model = None           # replay_model.PlayerModel
+        self.life_probe = bool(os.environ.get("TH13_LIFE_PROBE"))
         self.replay_stage_index = 0
         self.boss_serial = None     # "Boss" 例程敌机序号（on_spawn 登记）
         self.nonspell_frame = -1    # Boss 第一非符（首条 513）帧
@@ -852,6 +853,23 @@ class Stage1Oracle:
             self.model.step_fire(state, frame)
             self.drive(MGR_UPDATE, regs={"edi": self.ctl})
             self.apply_shots()
+            if self.life_probe:  # 生命轨迹对拍探针（TH13_LIFE_PROBE=1）
+                for sh_x, sh_y, sh_d in self.model.shots:
+                    sys.stdout.write("SHOT f=%d x=%.9g y=%.9g dmg=%.9g\n"
+                                     % (frame, sh_x, sh_y, sh_d))
+                VM = 0x11EC
+                for base, serial in self.enemy_serial.items():
+                    life = struct.unpack("<i", bytes(
+                        self.uc.mem_read(base + VM + 0x3F4C, 4)))[0]
+                    px = f32(bytes(self.uc.mem_read(base + VM + 0x44, 4)))
+                    py = f32(bytes(self.uc.mem_read(base + VM + 0x48, 4)))
+                    hw = f32(bytes(self.uc.mem_read(base + VM + 0x110, 4)))
+                    hh = f32(bytes(self.uc.mem_read(base + VM + 0x114, 4)))
+                    flags = self.rd32(base + VM + 0x4030)
+                    sys.stdout.write(
+                        "LIFE f=%d e=%d life=%d pos=(%.9g,%.9g) hb=(%.9g,%.9g) "
+                        "flags=%08x\n"
+                        % (frame, serial, life, px, py, hw, hh, flags))
             if self.nonspell_seen and frame >= self.nonspell_frame + 300:
                 break
             if frame % 300 == 0:
