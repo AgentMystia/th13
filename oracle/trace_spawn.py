@@ -620,6 +620,105 @@ class SpawnTracer(RenderOracle):
                     self.dump_vm_inputs(val)
         self.m.watch(self.d3d.dev_slots[0x144], on_draw_primitive)
 
+        # ---- f92 层内序取证：主链遍历序（0x46f170 逐节点）+ 层桶序 ----
+        # 0x46f170 遍历 f48208 链逐 VM tick；ESI=VM 表头（+0x54c 自指）。
+        # 只在 f91/f92 记录遍历序（s4aa + 地址），并记 0x46f3f0/f4a0 实际归表。
+        self._walk_log = []
+
+        # 0x46f1d7：遍历体 tick 点（ESI=VM，链头起）——记录层桶追加序。
+        def on_pool_walk(machine):
+            if self.frame not in (91, 92):
+                return
+            vm = machine.uc.reg_read(UC_X86_REG_ESI)
+            if not (0x00800000 <= vm < 0x06000000):
+                return
+            script = struct.unpack(
+                "<H", self.uc.mem_read(vm + 0x4AA, 2))[0]
+            layer = self.rd32(vm + 0x24)
+            self._walk_log.append(
+                (self.frame, vm, script, layer,
+                 self.rd32(vm + 0x18) & 0xffffffff))
+        self.m.watch(0x0046F1D7, on_pool_walk)
+
+        def report_walk():
+            for (fr, vm, script, layer, flags) in self._walk_log:
+                sys.stderr.write(
+                    "[walk f%d] vm=%08x s4aa=%d L%d flags=%08x\n"
+                    % (fr, vm, script, layer, flags))
+        self._report_at_end = report_walk
+
+        # 0x46f4a0（头插）与 0x46f3f0（尾插）在 f91/f92 的真实命中：
+        # EDI=f4a0 表 / EBX=f3f0 表（unaff_EDI/unaff_EBX 反编译已证）。
+        def on_head_insert(machine):
+            if self.frame in (91, 92):
+                vm = machine.uc.reg_read(UC_X86_REG_EDI)
+                log("[f%d] F4A0-head vm=%08x s4aa=%d\n" % (
+                    self.frame, vm,
+                    struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0]))
+        self.m.watch(0x0046F4A0, on_head_insert)
+
+        def on_tail_insert(machine):
+            if self.frame in (91, 92):
+                vm = machine.uc.reg_read(UC_X86_REG_EBX)
+                log("[f%d] F3F0-tail vm=%08x s4aa=%d\n" % (
+                    self.frame, vm,
+                    struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0]))
+        self.m.watch(0x0046F3F0, on_tail_insert)
+
+        # ---- f159 world[12] ULP 分歧取证：0x4692d0 LAB_004696d2 的平移输入 ----
+        # world[12] = (+0x574 + +0x3c + +0x4e0) - (+0x90 * +0x60 * +0x68)。
+        # dump 每次进入 0x4692d0 的灵 VM（param_2）输入值与运算次序。
+        def on_world_quad(machine):
+            if self.frame not in (158, 159):
+                return
+            esp = machine.uc.reg_read(UC_X86_REG_ESP)
+            edx = machine.uc.reg_read(UC_X86_REG_EDX)
+            eax = machine.uc.reg_read(UC_X86_REG_EAX)
+            for name, vm in (("edx", edx), ("eax", eax)):
+                if 0x00800000 <= vm < 0x06000000:
+                    raw = bytes(self.uc.mem_read(vm + 0x3C, 4))
+                    bits_ = struct.unpack("<I", raw)[0]
+                    f = lambda off: struct.unpack(
+                        "<f", self.uc.mem_read(vm + off, 4))[0]
+                    b = lambda off: struct.unpack(
+                        "<I", self.uc.mem_read(vm + off, 4))[0]
+                    # 插值通道0（位置）：duration 在 vm+0xEC（0x4652c4 cmpl），
+                    # 0x402420 通道基址偏移 +0x50 ⟹ ch = vm+0x9C；
+                    # start=ch+0/4/8、end=ch+0xc/10/14、elapsed=ch+0x44、
+                    # mode=ch+0x54、current=ch+0x30/34/38。
+                    ch = vm + 0x9C
+                    log("[f%d 0x4692d0 %s] vm=%08x s4aa=%d x3c=%g bits=%08x "
+                        "y40=%g 60=%g 64=%g | ch start=%08x,%08x,%08x "
+                        "end=%08x,%08x,%08x elapsed=%08x dur=%08x mode=%08x\n" % (
+                        self.frame, name, vm,
+                        struct.unpack("<H", self.uc.mem_read(vm + 0x4AA, 2))[0],
+                        struct.unpack("<f", raw)[0], bits_,
+                        f(0x40), f(0x60), f(0x64),
+                        struct.unpack("<I", self.uc.mem_read(ch, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 4, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 8, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 0xC, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 0x10, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 0x14, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 0x44, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 0x50, 4))[0],
+                        struct.unpack("<I", self.uc.mem_read(ch + 0x54, 4))[0]))
+                    break
+        self.m.watch(0x004692D0, on_world_quad)
+
+        # 0x473a40 mode9：jp（t2<1）→ 0x473b98 走 t2²*0.5；t2≥1 fallthrough
+        # 0x473b7a 走 (2-(2-t2)²)*0.5，落位 fstps @0x473b8a。watch 其后的
+        # flds（0x473b8e）读 esp+4 = 权重 f32 位——f159 采样对照。
+        def on_w9_else(machine):
+            if self.frame != 159:
+                return
+            esp = machine.uc.reg_read(UC_X86_REG_ESP)
+            raw = struct.unpack("<I", self.uc.mem_read(esp + 4, 4))[0]
+            log("[f%d] W9-t2ge1 w bits=%08x (%.9g)\n" % (
+                self.frame, raw,
+                struct.unpack("<f", self.uc.mem_read(esp + 4, 4))[0]))
+        self.m.watch(0x00473B8E, on_w9_else)
+
 
 def main(argv):
     frames = int(argv[1]) if len(argv) > 1 else 30
@@ -627,6 +726,8 @@ def main(argv):
                          "artifacts/reference/raw", "/tmp/trace-draws.jsonl")
     sys.stderr.write("=== trace_spawn frames=%d ===\n" % frames)
     tracer.run(frames=frames)
+    if getattr(tracer, "_report_at_end", None):
+        tracer._report_at_end()
     sys.stderr.write("SUMMARY spawns=%d attaches=%d ups=%d\n" % (
         tracer._spawn_count, tracer._attach_count, tracer._up_count))
     total = 0
