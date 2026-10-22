@@ -168,6 +168,26 @@ class SpawnTracer(RenderOracle):
             log("[f%d %s] MAIN+ %s  via %s\n" % (
                 self.frame, self.tag, self.vm_desc(vm),
                 self.call_chain(machine)))
+            if self.frame in (61, 62) and not getattr(self, "_e61", False):
+                script = struct.unpack(
+                    "<H", self.uc.mem_read(vm + 0x4AA, 2))[0]
+                if script == 5:
+                    self._e61 = True
+                    parent = self.rd32(vm + 0x570)
+                    log("    [enemy61 vm=%08x] +0x570(parent)=%08x "
+                        "ofs574/578/57c=%g,%g,%g flags18=%08x\n" % (
+                            vm, parent,
+                            self.f32at(vm + 0x574), self.f32at(vm + 0x578),
+                            self.f32at(vm + 0x57C),
+                            self.rd32(vm + 0x18)))
+                    if parent:
+                        log("      parent p3c/40/44=%g,%g,%g flags1c=%08x "
+                            "p570=%08x\n" % (
+                                self.f32at(parent + 0x3C),
+                                self.f32at(parent + 0x40),
+                                self.f32at(parent + 0x44),
+                                self.rd32(parent + 0x1C),
+                                self.rd32(parent + 0x570)))
             if self.frame == 0 and not getattr(self, "_sprite_watch", False):
                 self._sprite_watch = True
                 # 回看模板状态：file+0x10c + script*0x5a4
@@ -357,6 +377,19 @@ class SpawnTracer(RenderOracle):
             cand = [v for v in regs.values() if 0x00800000 <= v < 0x06000000]
             log("[f%d L8 dispatch] regs=%s\n" % (
                 self.frame, " ".join("%s=%08x" % kv for kv in regs.items())))
+            if cand:
+                vm = cand[0]
+                log("   vm=%08x flags1c=%08x anchor90/94=%g,%g "
+                    "ofs4e0/4e4/4e8=%g,%g,%g p3c/40/44=%g,%g,%g "
+                    "dims80/84=%g,%g scale60/64=%g,%g\n" % (
+                        vm, self.rd32(vm + 0x1C),
+                        self.f32at(vm + 0x90), self.f32at(vm + 0x94),
+                        self.f32at(vm + 0x4E0), self.f32at(vm + 0x4E4),
+                        self.f32at(vm + 0x4E8),
+                        self.f32at(vm + 0x3C), self.f32at(vm + 0x40),
+                        self.f32at(vm + 0x44),
+                        self.f32at(vm + 0x80), self.f32at(vm + 0x84),
+                        self.f32at(vm + 0x60), self.f32at(vm + 0x64)))
             for v in cand[:2]:
                 f18 = self.rd32(v + 0x18)
                 log("   cand %08x: flags18=%08x mode=%d color528=%08x "
@@ -368,6 +401,91 @@ class SpawnTracer(RenderOracle):
                         struct.unpack("<H", self.uc.mem_read(v + 0x34, 2))[0]))
         self._disp_log = 0
         self.m.watch(0x0046A700, on_dispatch)
+
+        def on_pos_fn(machine):
+            # 0x466a80 thiscall：this=ECX
+            if self.frame != 61:
+                return
+            this_ = machine.uc.reg_read(UC_X86_REG_ECX)
+            log("[f61] 0x466a80 this=%08x esi=%08x p3c/40/44=%g,%g,%g "
+                "flags1c=%08x\n" % (
+                    this_, machine.uc.reg_read(UC_X86_REG_ESI),
+                    self.f32at(this_ + 0x3C) if this_ else 0,
+                    self.f32at(this_ + 0x40) if this_ else 0,
+                    self.f32at(this_ + 0x44) if this_ else 0,
+                    self.rd32(this_ + 0x1C) if this_ else 0))
+        self.m.watch(0x00466A80, on_pos_fn)
+
+        def on_corner_build(machine):
+            # 0x467b50 建角入口：ESI=VM
+            if not (61 <= self.frame <= 61) or self.d3d.cur_layer != 8:
+                return
+            vm = machine.uc.reg_read(UC_X86_REG_ESI)
+            if not (0x00800000 <= vm < 0x06000000):
+                return
+            parent = self.rd32(vm + 0x570)
+            blob = bytes(self.uc.mem_read(vm, 0x5A4))
+            import struct as _st
+            found = []
+            for off in range(0, 0x5A4 - 4, 4):
+                v = _st.unpack_from("<f", blob, off)[0]
+                if abs(v + 163.783264) < 0.01 or abs(v - 156.2167) < 0.01:
+                    found.append("+%x=%g" % (off, v))
+            log("[f61 L8] vm=%08x ECL值命中: %s\n" % (vm, found or "无"))
+            log("[f61 L8] 0x467b50 vm=%08x p3c/40=%g,%g anchor90/94=%g,%g "
+                "flags1c=%08x ofs4e0/4e4=%g,%g scale60/64=%g,%g "
+                "parent570=%08x\n" % (
+                    vm, self.f32at(vm + 0x3C), self.f32at(vm + 0x40),
+                    self.f32at(vm + 0x90), self.f32at(vm + 0x94),
+                    self.rd32(vm + 0x1C),
+                    self.f32at(vm + 0x4E0), self.f32at(vm + 0x4E4),
+                    self.f32at(vm + 0x60), self.f32at(vm + 0x64), parent))
+            if parent:
+                log("      parent=%08x p3c/40/44=%g,%g,%g flags1c=%08x "
+                    "gp570=%08x\n" % (
+                        parent, self.f32at(parent + 0x3C),
+                        self.f32at(parent + 0x40), self.f32at(parent + 0x44),
+                        self.rd32(parent + 0x1C),
+                        self.rd32(parent + 0x570)))
+        self.m.watch(0x00467B50, on_corner_build)
+
+        def on_up_path(machine):
+            # 0x467350 UP 路径核心：只记 f61-63 的 L8（敌机）
+            if not (61 <= self.frame <= 63) or self.d3d.cur_layer != 8:
+                return
+            if self._up_log >= 4:
+                return
+            self._up_log += 1
+            mgr = machine.uc.reg_read(UC_X86_REG_ECX)
+            vm = machine.uc.reg_read(UC_X86_REG_EAX)
+            corners = struct.unpack(
+                "<16f", self.uc.mem_read(0x004E47D8, 64))
+            vp = struct.unpack(
+                "<6i", self.uc.mem_read(self.rd32(0x004DCC18) + 0xD8, 24))
+            log("[f%d L8] 0x467350 mgr+d0/d4=%g,%g vm+3c..44=%g,%g,%g "
+                "corners=%s vp=%s\n" % (
+                    self.frame, self.f32at(mgr + 0xD0), self.f32at(mgr + 0xD4),
+                    self.f32at(vm + 0x3C), self.f32at(vm + 0x40),
+                    self.f32at(vm + 0x44),
+                    ",".join("%g" % c for c in corners[:8]), list(vp)))
+        self._up_log = 0
+        self.m.watch(0x00467350, on_up_path)
+
+        def on_enqueue(machine):
+            if not (61 <= self.frame <= 62):
+                return
+            if self._enq_log >= 3:
+                return
+            self._enq_log += 1
+            corners = struct.unpack(
+                "<16f", self.uc.mem_read(0x004E47D8, 64))
+            mgr = self.rd32(0x004DC688)
+            log("[f%d L%s] 0x467a80 enqueue corners=%s mgr_d0/d4=%g,%g\n" % (
+                self.frame, self.d3d.cur_layer,
+                ",".join("%g" % c for c in corners[:8]),
+                self.f32at(mgr + 0xD0), self.f32at(mgr + 0xD4)))
+        self._enq_log = 0
+        self.m.watch(0x00467A80, on_enqueue)
 
         self._quad_dumps = 0
         # watch DrawPrimitive 槽（override 已弹栈：返回地址在 esp-4-ret_pop）。
