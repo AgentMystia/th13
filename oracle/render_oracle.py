@@ -535,8 +535,20 @@ class D3DXStubs:
         self.m = ro.m
         uc = ro.m.uc
 
-        def stub(name, nargs, fn):
-            self.m.stub(name, fn, args_pop=4 * nargs)
+        def stub(name, nargs, fn, stdcall=True):
+            # 本作 D3DX 导入=被调方弹参（栈审计实证，非官方头文件的
+            # cdecl）：0x4076c0 对 D3DXMatrixTranslation/D3DXVec3Project
+            # Array 调用**零调用方清栈**且尾声为裸 pop esi/pop ebp/ret 8
+            # （非 leave 式）——参数只能由被调方弹出；0x46dc32 的
+            # D3DXCreateTexture 同样 push 后无自清栈。
+            # D3DXVec3ProjectArray 在 0x407a24 调用点实推 **9 个 dword**
+            # （0x4079f7..0x407a23 逐指令数出，含尾参 0x10），注册按
+            # 头文件 8 参弹 32 曾欠弹 4 字节 → 0x407cd1 pop esi 弹到帧
+            # 局部量 0x10 → esi 垃圾 → 0x408178 and [esi-6] 读 0xA 崩
+            # （窗C f754 攻坚第 4 例环境破坏类 bug）。全 .text 扫描证实
+            # ProjectArray 仅此一个调用点（战斗窗 UP 路径走单点
+            # Project），改 9 参只影响此处。
+            self.m.stub(name, fn, args_pop=4 * nargs if stdcall else 0)
 
         def rd_matrix(addr):
             return list(struct.unpack("<16f",
@@ -697,7 +709,7 @@ class D3DXStubs:
         stub("D3DXVec2Normalize", 2, vec2_Normalize)
         stub("D3DXVec3Transform", 3, vec3_Transform)
         stub("D3DXVec3Project", 6, vec3_Project)
-        stub("D3DXVec3ProjectArray", 8, vec3_ProjectArray)
+        stub("D3DXVec3ProjectArray", 9, vec3_ProjectArray)
         stub("D3DXCreateTexture", 8, self._d3dx_create_texture)
         stub("D3DXCreateTextureFromFileInMemoryEx", 15,
              self._d3dx_create_texture_from_file)
