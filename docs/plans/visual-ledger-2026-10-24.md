@@ -47,19 +47,47 @@ f2381=0.243 f2450=0.195 f5494=0.261 f5806=0.301 f5867=0.240 f5919=0.239。
 （这些数值与拔 hack 前逐位相同——见 §七 未决项：GL 层仍有 -96 偏移，
 提交侧已正确。数值为当前 honest 基线，阶段 1 修复以此为对照。）
 
-## 七、未决项（最高优先）：GL 渲染层 -96 水平偏移
+## 七、GL -96 未决项（M0.3 于 2026-10-24 战役定案销账）
 
-现象链（全部实测）：
-1. 运行时探针（th13_probe_camera，BrowserRuntime 导出）证实：env
-   screen_offsets[2]=320 生效、相机 view[0/1]={128,16,384,448} view12=-320
-   生效、玩家 quad 提交坐标 (305,393)=正确游戏坐标（ECL+320）。
-2. 但渲染像素仍整体 -96（运动带 [32,416)；NCC/cmp 字节级复核确认图像
-   与 hack 时代逐位相同——提交侧修复未反映到像素）。
-3. 共享 Renderer RWH 着色器语义为视口恒等（Shaders.hpp:28），无平移源。
-下一步协议（确定性对齐架构 §四-1 落地时一并解决）：web 侧 DrawCapture
-导出提交清单（已证正确）+ glReadPixels 定点采样（如 (305,416) vs (209,416)
-玩家中心像素）→ 在 提交→GL→呈现 三段间二分定位。候选面：Renderer 批次
-状态、presentation/canvas 呈现链、uniform 视口时序。
+**结论：GL 层并无 -96 偏移；旧测量是陈旧构建假象。残余真差 = STD 舞台子系统（本就在
+一切门禁捕获面之外）。** 证据链（全部确定性/代码级，无看图裁决）：
+
+1. **精灵/HUD/玩家渲染位置正确**：fresh 主构建（sha e65d4a9e）f901 帧三重验证——
+   web 捕获清单玩家四边形提交于 (258.5,334.5)-(288.5,366.5)，glReadPixels 直读帧缓冲
+   与 canvas.toDataURL 两条取像路径逐位一致：提交位红像素 325 个、-96 位 0 个。
+2. **陈旧构建假象实锤**：旧测量所用主产物 build.json builtAt=2026-10-23T20:16Z，
+   早于拔 hack 提交 162abd36（04:26+0800）10 分钟——「拔 hack 后像素逐位不变」
+   就是在跑旧代码。教训升格：**视觉结论引用前必须核对产物 sha 与源码提交对应**。
+3. **残余真差（STD 舞台 stg1bg 墙艺在 ours 呈 [32,416] 边对）**：
+   - oracle 战斗窗（st01-draws-replay f901）**零 stg1bg op**、全链路窗战斗段亦无——
+     STD 舞台 walk（0x404140 族）从未进任何 oracle 捕获面，移植侧 STD 相机链
+     无门禁可依。像素级墙艺比对因战斗态自 f124 分歧（卫星弹）而不可裁决。
+   - Ghidra 新锚点：**0x43bbc0 初始化两组相机/视口配置**——DAT_004dc9d0+0xd8 =
+     {0,0,640,480} 全屏、DAT_004dc8ac+0xd8 = **{32,16,384,448}**；0x404140 绘制遍历
+     按相机组（实例+0x11c）切换 SetViewport；0x43ba20 场景相机 aspect=该视口宽高、
+     zn=30、**zf=1800**（移植侧误 8000，已修正 SceneMatrices.cpp）。
+   - 待 battle_oracle（M1.1）驱动真实 STD walk 后：STD op 序/视口组路由/相机态
+     全部进捕获面，按清单比对裁决（登记于确定性对齐战役 M2.0）。
+4. 「运动带 [32,416)」旧测量重新解读：被 STD 舞台内容主导（精灵/HUD 实为正确），
+   [32,416) 恰为 DAT_004dc8ac 视口 {32,16,384,448} 的特征——原版 STD 相机组 1 本就
+   画在该视口，ours 视口路由是否正确待 M1.1 定（不能按像素反推）。
+
+## 四、确定性对齐架构（用户令 2026-10-24，进行中）
+
+目标：门禁通过 ⇒ web 实际渲染与原版一致（不依赖看图）。三层：
+1. **web 侧语义清单导出（M0.1 已落地）**：GraphicsDevice 内嵌 DrawCapture 影子
+   （提交时快照 pipeline、虚调用转发矩阵/布局/视口/绑定、present 为帧界），
+   捕获构建 `TH13_WEB_CAPTURE=1 node portable/build.mjs` →
+   `web/artifacts/sdl3-capture/`；纹理身份按原版 26 槽表登记
+   （常驻 7 bank/front/bullet=7/关卡名单 10+i/plXX=-1/STD=-1 待定档）。
+   驱动 `scripts/web_draws_capture.mjs`（shot 容器 chromium 泵 + 整帧 RGBA 取证），
+   debug 页 `?artifact=` 指定捕获构建，`th13_debug_capture_begin/end/tell` +
+   `th13_debug_read_pixels`（像素锚点采样基建，M0.2 的 gate 接线待 W-S1 窗）。
+   30/150/910 帧三档实测：schema 与 oracle 同构、层号钩子/纹理身份生效。
+2. **oracle 捕获面扩展（M1 battle_oracle 进行中）**：0x470c30 真调度器 draw walk
+   → HUD/敌弹/自机弹/玩家/STD 舞台全族入捕获面（hud-capture-plan §2.1 十族表）。
+3. **栅格层**：portable Renderer 与 th15 逐字节一致（共享件信任）+ 渲染统计
+   契约测试；视频 golden 降级为最终人审辅助。
 
 ## 三、审计清单（两轮视觉子代理 + oracle 仲裁）
 
@@ -87,20 +115,6 @@ f2381=0.243 f2450=0.195 f5494=0.261 f5806=0.301 f5867=0.240 f5919=0.239。
 - 二轮审计者提出 dx=0 对齐异议（P0）——系读 side-by-side 合成图（ours 已按
   +98 裁剪）所致循环论证 + -96 hack 恰好抵消 golden -97 裁剪；已用 oracle
   敌机 verts 数据仲裁完结。此事件再次证明：**看图不可作几何裁决**。
-
-## 四、确定性对齐架构（用户令 2026-10-24，进行中）
-
-目标：门禁通过 ⇒ web 实际渲染与原版一致（不依赖看图）。三层：
-1. **web 侧语义清单导出**：GraphicsDevice 内嵌 DrawCapture 影子（逐调用转发），
-   debug 泵驱动逐帧 JSONL（与 oracle 同 schema：%.9g 浮点/viewport DWORD 口径），
-   浏览器导出 → `draw_compare` oracle↔web-candidate 逐字段比对，入 run-gate
-   （golden 只升不降）。**此项将把 -96 类回归（矩阵层正确、渲染层错位）纳入
-   门禁可见面。**
-2. **oracle 捕获面扩展**：0x40e4d0 族（HUD/玩家/弹幕/道具直绘遍历）进假设备
-   清单——画面主体全覆盖（当前两池清单 f1242 仅 61 个 effect op + L56 敌机批，
-   弹/玩家/HUD 全在捕获面外）。
-3. **栅格层**：portable Renderer 与 th15 逐字节一致（共享件信任）+ 渲染统计
-   契约测试；视频 golden 降级为最终人审辅助。
 
 ## 五、覆盖矩阵增补
 - 「游戏 x∈[0,98) 无 golden 佐证」（视频源缺失）——视觉比对未覆盖区。
