@@ -2,10 +2,18 @@
 
 用法（容器内 /work）：
     python3 -m oracle.draw_compare <port.jsonl> <oracle.jsonl> [--ulp N]
+    python3 -m oracle.draw_compare <port.jsonl> <oracle.jsonl> --ignore <field>
 
 范式对齐 stage1_compare.py：末行
-    RESULT first_divergence_frame=<n|none> window=<帧数> ops=<数>
+    RESULT first_divergence_frame=<n|none> window=<帧数> ops=<数> [ignored=<字段,...>]
 为唯一裁决。浮点字段按 ULP 容差（默认 4），其余字段精确比对。
+
+--ignore 纪律（整改 2026-10-23，draw-contract.md §6）：
+  * --ignore 是**诊断模式**开关，仅限隔离工作面用（定位「除 X 外是否还有
+    其他分歧」）；绿灯/门禁链路**禁止**带 --ignore 出 RESULT。
+  * 带 --ignore 的输出：RESULT 行尾强制追加 ignored=<字段> 且 exit code=3
+    （与无过滤 0/1 区分），避免被误当全绿。
+  * 每个 --ignore 的字段必须在 HANDOFF/工作面登记销账条件与期限。
 """
 import json
 import math
@@ -109,7 +117,7 @@ def main(argv):
             ulp = int(argv[i])
         elif argv[i] == "--ignore":
             i += 1
-            ignore.add(argv[i])  # 粗筛模式：跳过字段（如 tfactor 残留态）
+            ignore.add(argv[i])  # 诊断模式：跳过字段（纪律见模块 docstring）
         else:
             args.append(argv[i])
         i += 1
@@ -154,12 +162,19 @@ def main(argv):
 
     if first_div:
         print("first divergence at frame %d: %s" % first_div)
-        print("RESULT first_divergence_frame=%d window=%d ops=%d"
-              % (first_div[0], window, total_ops))
+        print("RESULT first_divergence_frame=%d window=%d ops=%d%s"
+              % (first_div[0], window, total_ops, ignored_suffix(ignore)))
         return 1
-    print("RESULT first_divergence_frame=none window=%d ops=%d"
-          % (window, total_ops))
-    return 0
+    print("RESULT first_divergence_frame=none window=%d ops=%d%s"
+          % (window, total_ops, ignored_suffix(ignore)))
+    # 诊断模式（带 --ignore）永远不算绿灯：exit 3 与无过滤的 0 区分，
+    # 门禁脚本按 code 判定，杜绝「过滤后全绿」被当真绿（整改纪律）。
+    return 3 if ignore else 0
+
+
+def ignored_suffix(ignore):
+    # RESULT 行尾的显式登记：被过滤字段全名列出（整改 2026-10-23）。
+    return " ignored=%s" % ",".join(sorted(ignore)) if ignore else ""
 
 
 if __name__ == "__main__":
