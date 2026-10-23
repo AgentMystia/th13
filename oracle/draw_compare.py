@@ -101,17 +101,21 @@ def load(path):
 def main(argv):
     args = []
     ulp = 4
+    ignore = set()
     i = 1
     while i < len(argv):
         if argv[i] == "--ulp":
             i += 1
             ulp = int(argv[i])
+        elif argv[i] == "--ignore":
+            i += 1
+            ignore.add(argv[i])  # 粗筛模式：跳过字段（如 tfactor 残留态）
         else:
             args.append(argv[i])
         i += 1
     if len(args) != 2:
         sys.stderr.write("usage: draw_compare <port.jsonl> <oracle.jsonl> "
-                         "[--ulp N]\n")
+                         "[--ulp N] [--ignore field]\n")
         return 2
     port_frames, port_ops = load(args[0])
     oracle_frames, oracle_ops = load(args[1])
@@ -138,6 +142,9 @@ def main(argv):
             first_div = (frame, "ops len %d != %d" % (len(po), len(oo)))
             break
         for k, (a, b) in enumerate(zip(po, oo)):
+            if ignore:
+                a = {key: value for key, value in a.items() if key not in ignore}
+                b = {key: value for key, value in b.items() if key not in ignore}
             r = cmp_value("op[%d]" % k, a, b, ulp)
             if r:
                 first_div = (frame, r)
