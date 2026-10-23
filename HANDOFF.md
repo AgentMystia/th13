@@ -89,6 +89,29 @@
 11. **动态工作流缓存**：已 settle 阶段的 ask 文本一个字不能改（改 = 全失效重付）；修订用 Edit + AmendWorkflow；尾洞填洞用 FillWorkflowHole
 12. **GLM-5.3 个人订阅周配额**（5 小时/周，code 1308/1310）→ 配额满时用户指示切模型（zai-glm-5-3$max）或等重置后 ResumeWorkflowRun
 
+## 渲染一致化战役进展（2026-10-23 会话）
+
+**可靠渲染比较器已落地**：标题窗 A（600 帧）与对局回放窗（11065 帧）的语义绘制清单
+oracle 双窗比对链路啣动。`oracle/draw_compare.py`（+`--ignore` 粗筛开关）为唯一裁决。
+
+**标题窗 A 推进记录**（f0 → f487，81% 窗口）：
+- boot tick 对齐（advance_loading 首帧补 update）→ f0
+- select00 右半创建期层 21→23 → f180
+- 灰白交换模型（灰条入场 = 旧隐+新 VM 尾插 rearm_grey + w13 poke 窗收窄 181-191）→ f371
+- 移动交叉曲线（w15 降 5 帧 {163,91,40,10,0}、旧灰 s2 出、新灰恒驻）→ f381
+- ver 批序（requeue_to_back 新 API + ver 延帧创建）→ f389
+- Z 序（ver label1 当帧中断 + retire age==9 + LOGO retire age==15 + fade 12.75/帧精率
+  + 黑条 -8 独立率 + 跳过已隐项 + w14 poke 收窗）→ f483
+- 背景亮化 label 3（Z+18）→ f487
+- **f487 起暂停**：ins_408 首帧语义差（oracle 首两帧不步进、port 首帧步进）——引擎语义工作面
+
+**对局回放窗**（旧基线 f8 → 现 f9）：
+- f8 ops len 2!=1 = port 弹型脚本 spawn 的子弹入层桶（真机走 IShot 独立遍历）——
+  draws-replay 层桶绘制隐藏 player-bank 池 VM（flags bit0）镜像捕获面 → f9
+- f0 tfactor 残留（a=4 vs 6）= 装载趟插值进度残留态（§8.8 族，`--ignore tfactor` 隔离）
+- **f9 真工作面**：神灵出生坐标差（port world[12]=(188,190) vs oracle (57,208)）=
+  ECL 独立种子 0 流（[-9987] 抽）不同步 —— 需 ECL RNG trace 对拍
+
 ## 已知缺口（覆盖矩阵「未覆盖」清单）
 
 - oracle 捕获面：HUD/玩家/弹幕遍历/关卡 ctx 5 叠加层**未捕获**（需扩展假设备捕获范围）
