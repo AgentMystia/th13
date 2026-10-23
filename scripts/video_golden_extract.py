@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """video_golden_extract.py —— 视频帧↔游戏帧对齐拟合 + golden 参考帧抽取
 
-前置结论（见 artifacts/reference/golden/README.md「时间轴对齐」）：
-  * 视频游戏区为 x∈[0,1440) 全高（1440×1080 = 640×480 的 2.25 倍），右侧
-    x∈[1440,1520) 为黑分隔条、1520 起为速通面板（早/中/晚三处抽帧核实恒定）。
+前置结论（见 artifacts/reference/golden/README.md「时间轴对齐」＋2026-10-24
+几何校准勘误，证据=scripts/measure_playfield.py + 原始帧列梯度三点锚定拟合
+tmp/fit_mapping.py，残差 ≤0.2px）：
+  * 视频内游戏窗口映射：video_x = 2.2556 × game_x − 219.7 —— **录像源缺失
+    游戏左侧 ~97px**（视频 x=0 即 game x≈97.4），游戏窗口右边缘在视频
+    x=1224；1224..1440 为速通者叠加信息区、1440..1520 黑分隔、1520 起速通
+    面板。旧版「游戏区=全宽 1440」为误判。
+  * 抽取几何：crop=1224:1080:0:0 + scale=544:480（缩放比 0.4444 不变）——
+    golden 帧 544×480 = 游戏真坐标 x∈[97,640]，逐像素对齐 ours 截图的
+    x∈[98,640]（±1px）。游戏 x<97 与比对协议见 golden/README.md。
   * 视频从标题菜单开始：视频帧号 ≠ 游戏帧号。游戏帧号以
     games/replays/th13_01.rpy 一面输入流为基准（帧 0=一面开始），
     关卡累计帧由各 stage.frame_count 累加。
@@ -87,11 +94,13 @@ def fit():
 
 
 def grab(video_frame, out_path):
-    """按视频帧号抽 640×480 PNG：游戏区裁剪 + lanczos 缩放。"""
+    """按视频帧号抽 544×480 PNG：游戏窗口裁剪（x∈[0,1224)，右缘=游戏 x=640，
+    左缘=game x≈97.4——录像源缺失游戏左侧 ~97px，见文件头几何校准勘误）+
+    lanczos 缩放（0.4444，与旧版一致）。产出=游戏真坐标 x∈[97,640]。"""
     subprocess.run(
         ["ffmpeg", "-v", "error", "-ss", f"{video_frame / 60.0:.6f}", "-i", VIDEO,
          "-frames:v", "1",
-         "-vf", "crop=1440:1080:0:0,scale=640:480:flags=lanczos",
+         "-vf", "crop=1224:1080:0:0,scale=544:480:flags=lanczos",
          "-y", out_path], check=True)
 
 

@@ -8,7 +8,12 @@
 
 比对约定：
   * 双方目录内同名 frame_%06d.png 为同一游戏帧（帧号即取像索引）；
-  * 图像按 640×480 的东方原版布局分三区：
+  * 几何适配（2026-10-24 golden 校准勘误，见 video_golden_extract.py 头注）：
+      golden 帧 544×480 = 游戏真坐标 x∈[97,640]（录像源缺失游戏左侧 ~97px，
+      video_x = 2.2556×game_x − 219.7 三点锚定）；ours 帧 640×480。
+      比对时 ours 裁 x∈[98,640] ↔ golden 取 x∈[0,542]（±1px 对齐残差）。
+      游戏 x∈[0,98) 无 golden 佐证——不在比对面内（覆盖矩阵「未覆盖」登记）。
+  * 图像按 640×480 的东方原版布局分三区（在裁剪后的比对面上）：
       顶栏 hud_top   = y ∈ [0, 32)     （分数/HiScore 一带）
       底栏 hud_bot   = y ∈ [448, 480)  （残机/灵力/Trance 槽一带）
       主视野 field   = 其余区域（自机/敌机/弹幕）
@@ -32,6 +37,21 @@ TH_FIELD = 0.02  # 主视野（弹幕/自机/背景）
 # 640×480 布局的分区（顶栏 32px、底栏 32px）
 TOP_H = 32
 BOT_H = 32
+
+# 几何适配（golden 校准勘误）：golden 544 宽 ↔ ours 裁剪窗
+GOLDEN_W = 544          # golden 帧 = 游戏真坐标 x∈[97,640]
+OURS_X0 = 98            # ours 裁 x∈[98,640] 与 golden 对齐（±1px 残差）
+COMPARE_W = 542         # 实际比对宽度
+
+
+def adapt(ga: np.ndarray, ob: np.ndarray):
+    """golden/ours 裁到同一比对面；尺寸恒同（640×480 时代）则原样返回。"""
+    if ga.shape == ob.shape:
+        return ga, ob
+    if ga.shape[0] == ob.shape[0] and ga.shape[1] == GOLDEN_W and ob.shape[1] == 640:
+        return ga[:, :COMPARE_W], ob[:, OURS_X0:640]
+    raise ValueError(f"未知尺寸组合: golden{ga.shape} vs ours{ob.shape}"
+                     "（预期 golden 544×480 + ours 640×480，或同形）")
 
 
 def region_diff(a: np.ndarray, b: np.ndarray) -> float:
@@ -81,6 +101,7 @@ def main() -> int:
     for f in common:
         ga = np.asarray(Image.open(gold[f]).convert("RGB"))
         ob = np.asarray(Image.open(ours[f]).convert("RGB"))
+        ga, ob = adapt(ga, ob)
         h = ga.shape[0]
         top = slice(0, TOP_H)
         bot = slice(max(0, h - BOT_H), h)
