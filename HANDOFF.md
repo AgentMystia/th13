@@ -1,7 +1,48 @@
 # HANDOFF — th13 神灵庙网页移植（会话交接文档）
 
-> 写于 2026-10-22，会话上下文过载前的整合。**下一会话先读本文件 + /work/AGENTS.md**，再决定行动。
-> 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，分支 `port/th13`，贡献目标）。
+> **2026-10-23 整改轮更新**：本轮按用户令执行「方法论检讨与整改」（对照 th17
+> 参考实录），完整证据链与整改记录见 **`docs/rectification-2026-10-23.md`**，
+> 新制度落在外层 `AGENTS.md`（机制层优先/主线窗/渲染基座纪律/比对工具纪律/
+> 子代理编排纪律/事故蒸馏 #2）。阅读顺序：**AGENTS.md → 本文件 → 检讨文档**。
+> 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，
+> 分支 `port/th13`，贡献目标）。
+
+## 2026-10-23 整改轮战况（基座治理 + 测试契约，全部容器实测）
+
+- **GraphicsState.hpp 与 th15 逐字节归一**：30 行无登记分叉清除——th13 语义
+  （TFACTOR 初始 0）下沉到两个本作配置点（`GraphicsDevice::initialize` +
+  `DrawCapture::open_output`，蓝图 §8.8 oracle 实证）；`configure_game` 的
+  Factor 第二参数 th13 全树零依赖（AnmRenderer::material 显式 Diffuse）。
+- **敌机句柄化扶正**：`enemies_from_ecl`+`ecl_slot_anm` 成为 web 默认路径
+  （RunScene::initialize；0x41fe80/case3 同构），敌机死亡经 `StageSim::
+  retire_sink` 回收槽位 VM（0x418e00 销毁支路 ANM 面）。**验证：st01 事件窗
+  3600/10187 复跑 `none`（句柄化零污染）；draws/draws-replay 两窗与基线
+  逐字节同；容器四套单测 62 例全绿**（顺手修复 ui 套件自 94daf443 起的
+  read_asset 签名编译破损——「三门禁绿」脱节的实证，检讨 §1.4）。
+- **测试契约（th15 式）**：渲染统计契约浏览器测试
+  `web/tests/sdl/graphics-stats.test.mjs`（真实 chromium 泵 demo0 回放
+  180 帧：无 subData 流式/glBufferData 整批/quad 直通主导/布局缓存有界，
+  **实测通过**）+ draws golden 对跑 `tools/replay-verifier/`（corpus +
+  run-oracle→run-gate，BASELINE-HELD 退化检测，两案例实测通过，golden
+  只升不降）。配套：`th13_debug_stats` 导出 + HEAPU8 运行时导出。
+- **draw_compare 去鸵鸟化**：`--ignore` = 诊断模式（RESULT 尾 `ignored=`
+  登记、exit 3 与门禁区分），契约条文 draw-contract.md §3.5（绿灯链路
+  禁用 + 限期销账）；NaN 相等性入契约。**`--ignore tfactor` 唯一登记项**，
+  销账条件 = 装载趟插值进度残留态建模完成。
+- **基准勘误（体检实测，旧登记已腐烂）**：①对局窗「f9 神灵出生坐标差」
+  **已不存在**（f9 world[12] 两侧全同）；当前真实前沿 = **f61 敌机行走精灵
+  x 差 96px（ECL 运动链）+ f0 tfactor 一帧滞后族**（port 0x4fff5ff vs
+  oracle 0x6fff5ff，alpha 通道差）——两窗同源（下「下一步」）。②udSr01
+  replay 事件窗实测 **f122**（基线 commit 与整改后同值；旧登记 2652 已
+  漂移，oracle 侧基线文件 udsr01-oracle-fix2b.jsonl 时代不符，需重锚）。
+- **文档制度**：ADAPTATION.md 升格 th15 式编号验收清单（战报叙事移交本
+  文件）；`ports/th13/docs/plans/coverage-matrix.md` 独立化（8 类场景窗
+  ×状态×销账条件 home）；蓝图 §8.7/§8.8 补锚点（悬空引用修复，检讨
+  §1.5——pickaxe 证实两节从未存在而 8 处代码引用）。
+- **主线切换声明**：下一战役主线 = **对局窗机制层**（f61 ECL 运动链 +
+  f0 tfactor 残留态建模——按 AGENTS.md 机制层优先原则走反编译导出，
+  不做参数微调）；标题窗 A f487 ins_408 冻结为引擎语义工作面（机制层
+  升级判据已触发登记）。
 
 ## 2026-10-23 凌晨战况（全链路战役 S1 进行中，AGENTS.md 已改「交付目标导向」）
 
@@ -112,21 +153,32 @@ oracle 双窗比对链路啣动。`oracle/draw_compare.py`（+`--ignore` 粗筛�
 - **f9 真工作面**：神灵出生坐标差（port world[12]=(188,190) vs oracle (57,208)）=
   ECL 独立种子 0 流（[-9987] 抽）不同步 —— 需 ECL RNG trace 对拍
 
-## 已知缺口（覆盖矩阵「未覆盖」清单）
+**【2026-10-23 整改轮勘误】**上段 f9 神灵坐标差实测已不存在（world 两侧全同），
+现前沿 = f61 敌机行走精灵 x 差 96px（ECL 运动链）；`--ignore tfactor` 已改
+诊断模式（draw-contract §3.5），本节保留作历史登记。
+
+## 已知缺口（覆盖矩阵「未覆盖」清单——home 已迁 `ports/th13/docs/plans/coverage-matrix.md`，本节为摘要）
 
 - oracle 捕获面：HUD/玩家/弹幕遍历/关卡 ctx 5 叠加层**未捕获**（需扩展假设备捕获范围）
-- 场景 draws 窗口：标题窗（主菜单重做工作流已设计，未执行）、难度/角色/HUD/暂停/结算**未建**
-- 对局绘制对齐：最好分歧帧 **511**（继续推进）
+- 场景 draws 窗口：难度/角色/HUD/暂停/结算/Boss **未建**（标题窗已推进至 f487）
+- 对局绘制对齐：现前沿 **f0（tfactor 残留）/f61（敌机行走位差）**——「511」旧基线为 tfactor 可见时代产物（体检勘误，检讨 §1.4）
+- udSr01 replay 事件窗 **f122**（旧登记 2652 漂移；oracle 侧基线需重锚）
 - `th13_01.rpy` 回放驱动在道中 Boss 后**自机孪生模型分歧**（10553 帧才击杀 MBoss）——对局对齐只用 `th13_udSr01` 窗
 - th13_01 视频同步：Boss 段游戏帧号由锚点拟合换算（非 oracle 事件直出）
+- 设备补件分期：PresentationFrame（高刷插值）/SceneCapture/离屏链（S3 入场条件登记，GraphicsDevice stub）
 - 手机真机/高刷/联机等现代化功能：**按用户要求不做**
 
-## 下一步建议（优先级）
+## 下一步建议（优先级；主线窗纪律见 AGENTS.md）
 
-1. **主菜单 ANM 驱动重做**（蓝图已齐）：修 `TitleSceneResources` 脚本号表 + `TitleMainMenu::update` 创建链路 → 标题窗 draws 窗口对齐（oracle 扩展菜单捕获 + 移植侧同构导出）→ 对局窗回归（≥511）→ 人类终审
-2. 继续对局窗绘制对齐（511 → 更高）
-3. 扩展 oracle 捕获面（HUD/玩家/弹幕层）
-4. 难度/角色/HUD/暂停/结算 draws 窗口逐步补齐（全链路完备性令）
+1. **对局窗机制层战役（新主线）**：f61 敌机行走精灵 x 差 96px（ECL 运动链，
+   0x41a8a0 位置跟随族反编译重读）+ f0 tfactor 一帧滞后（装载趟插值进度
+   残留态建模——`--ignore tfactor` 唯一登记项的销账路径）。机制层优先
+   原则执行：不做参数微调。
+2. 标题窗 A f487 ins_408：引擎语义工作面（oracle 侧 VM 层写 watch），
+   参数微调冻结。
+3. 扩展 oracle 捕获面（HUD/玩家/弹幕层）→ HUD/暂停窗建立。
+4. 难度/角色/结算 draws 窗口逐步补齐（全链路完备性令）+ udSr01 事件窗
+   oracle 侧基线重锚。
 
 ## 快速入口
 
@@ -138,6 +190,11 @@ make exec-port CMD='node --experimental-wasi-unstable-preview1 tools/run-harness
 # 关键命令（容器内 /work）
 python3 -m oracle.draw_compare /work/artifacts/port-draws/port-draws.jsonl /work/artifacts/oracle-draws/st01-draws.jsonl
 python3 -m oracle.stage1_compare /work/eagler-touhou/ports/th13/web/artifacts/wasi/stage1-events-fresh.jsonl /work/eagler-touhou/ports/th13/web/artifacts/wasi/stage1-oracle.jsonl
+# 整改轮新增门禁（monorepo 侧，容器内）
+node tools/replay-verifier/run-oracle.mjs && node tools/replay-verifier/run-gate.mjs   # golden 对跑（退化即 FAIL）
+bash tests/{anm,ecl,ui,replay}/run.sh                                                 # 单测四套
+# 浏览器统计契约（th13-shot 镜像）
+make shot CMD='node --test /work/eagler-touhou/ports/th13/web/tests/sdl/graphics-stats.test.mjs'
 # 浏览器实测
 python3 -m http.server -d eagler-touhou/ports/th13/web 8131   # → http://127.0.0.1:8131/sdl-runtime/th13.html
 # 回放复现任意帧
