@@ -7,6 +7,43 @@
 > 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，
 > 分支 `port/th13`，贡献目标）。
 
+## 2026-10-23 对局窗机制层战役战报（f61+f0 双销账，RAW 无过滤恢复）
+
+**两前沿全部机制层修复，对局双窗回到无过滤全字段比对：**
+
+- **f61 敌机行走位差 96px（已销账）**：根因 = **0x40000 屏幕原点常量错误**。
+  原版 th13 的游戏层 VM（layer<21 → flags 0x40000）屏幕原点 = **+320/+16**
+  （.data 双精度 0x4ae9f0=320.0 / 0x4ae8e0=16.0；0x466a80 up 路径、0x468670
+  quad 路径、0x46f820 创建模式 bit0 三处一致 + oracle anm_sync_probe
+  0x41a9d1 写点实测 off=0/attach=-1 排除偏移表与挂接支路）。port 误用
+  th15 遗产的 **224**（screen_offsets[2]，四处 setter：harness×2 +
+  Application×2）——差值恰 96px。修复 = 统一改 {32,16,**320**,16}。
+  排除法证据链：f9 世界坐标（0x419450 界检查 x∈[-192,192]）与事件流
+  全对齐 → 运动链无罪；oracle SYNC 探针证明 VM+0x574 写入两侧同值 →
+  位置跟随无罪；u/v 对上 script5 sprite12 → VM/脚本无罪；差值恒定
+  96px 逐帧无漂移 → 常量性偏移 → 锁定 adjust 阶段。
+- **f0 tfactor 残留（已销账，`--ignore tfactor` 台账清零）**：根因 =
+  **ECL 30x/镜像创建点色/α 插值缺一步「ctor 趟步进」**。原版 0x41fe80
+  case3 与 0x419450 镜像块在敌机更新趟（0x41a8a0 直调）内创建 VM，
+  创建趟对色通道多推进一步（oracle VM+0x15c α=6/timer(+0x160)=2 而
+  port 4/1 位级实测；α 插值 0→64/30tick）。非装载趟特例——f9 第二个
+  环境精灵同症证明是**每次创建**的普遍行为。修复 =
+  `StagePresentation::create_color_step`（三创建点：kind0 特效/kind1
+  槽位/镜像重挂；`AnmInterpolators::advance_color` 仅色/α 两通道——
+  整池 update 会推 world 矩阵，实测破坏 f0 对齐，故外科化）。
+- **销账实测（RAW 无过滤）**：对局无输入窗 f0→**f511**（3600 帧窗
+  14%），回放窗 f0→**f124**；标题窗 A f487 / B f379 无回归；
+  golden 对跑 BASELINE-HELD（run-oracle 顺手修 ERR_STRING_TOO_LONG：
+  1.1GB 候选整读 toString 撞 Node 512MB 上限 → 首行头部块读 + sha256
+  流式）。
+- **新前沿登记**：无输入窗 f511 = op[64].verts[12][1] 446.5≠447.5
+  （1px y——x87/SSE 数值语义面，AGENTS.md 数值纪律管辖）；回放窗
+  f124 = op[16].count 6≠4（批内精灵数差——回放输入驱动面）。
+- **取证脚手架入库**（外层仓）：`oracle/anm_sync_probe.py`（0x41a9d1
+  同步趟写点 + VM 位写入跟踪 + up 调用者追踪 + TFACTOR 写点 VM dump）、
+  `oracle/load_trip_probe.py`（装载趟驱动序列）、`scripts/
+  disasm_enemy_sync.py`（capstone 指令级反汇编）。
+
 ## 2026-10-23 整改轮战况（基座治理 + 测试契约，全部容器实测）
 
 - **GraphicsState.hpp 与 th15 逐字节归一**：30 行无登记分叉清除——th13 语义
