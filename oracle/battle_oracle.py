@@ -38,8 +38,9 @@ import struct
 import sys
 import time
 
-from unicorn import UcError, UC_HOOK_CODE
-from unicorn.x86_const import UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_EDI
+from unicorn import UcError, UC_HOOK_CODE, UC_HOOK_MEM_WRITE
+from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_EDI,
+                               UC_X86_REG_ESP, UC_X86_REG_EIP)
 
 from .title_oracle import (TitleOracle, SCENE_MGR, ANM_OPEN, ANM_MGR_CTOR,
                            BATTLE_PREOPEN)
@@ -57,14 +58,29 @@ BATTLE_THREAD = 0x0042B990            # 战斗装载线程体（0x42bf90 thunk �
 ENEMY_UPDATE = 0x00418E00             # ECL 敌机逻辑（每帧恰一次自证）
 MGR_LOADING = 0x20                    # anm mgr+0x20：装载等待环计数（>-1 忙）
 
+# replay u16 输入位（replay.md §5）→ VK 集（键态桩路径；位打包/边沿/连打
+# 由真机 0x471620/0x4711a0/0x474fb0 完成——TO 单帧注入自证法已验证）。
+REPLAY_INPUT_VK = (
+    (0x01, 0x5A),   # Z
+    (0x02, 0x58),   # X（炸弹/取消）
+    (0x08, 0x10),   # Shift（低速）
+    (0x10, 0x26),   # ↑
+    (0x20, 0x28),   # ↓
+    (0x40, 0x25),   # ←
+    (0x80, 0x27),   # →
+)
+PLAYER_ANM = {0: "pl00.anm", 1: "pl01.anm", 2: "pl02.anm", 3: "pl03.anm"}
+
 
 class BattleOracle(TitleOracle):
     def __init__(self, exe_path, raw_dir, out_path):
         super().__init__(exe_path, raw_dir, out_path)
         self.window = "battle"
-        self.input_script = {}             # 冒烟窗无输入（M1.2 接 u16 流）
+        self.input_script = {}             # 冒烟窗无输入（--replay 接 u16 流）
         self.difficulty = 1                # th13_01 = Normal
         self.character = 0                 # th13_01 = ReimuA
+        self.replay = None                 # ReplayFile（--replay）
+        self.replay_stage = None           # ReplayStage
         self.battle_requested = False
         self.battle_loader_started = False
         self.battle_first = None
@@ -89,6 +105,10 @@ class BattleOracle(TitleOracle):
         # → 0x42b030（进度条 VM 更新，per-frame 多调用者）裸写崩。
         self._lift_override(0x00462450, "ANM 脚本启动（事件窗合成 mgr 前提失效）")
         self._lift_override(0x00461CB0, "按弹种建弹体 ANM（同上）")
+        # 0x419a90（敌机被击杀：掉落/计分/ECL 击杀分支）：事件窗空转桩的
+        # 前提「玩家被动无击杀」在有输入窗失效——不拆则敌机打不死透→弹幕
+        # 堆积→玩家被击穿→f1177 伪 GameOver（golden f1242=正常符卡画面裁决）。
+        self._lift_override(0x00419A90, "敌机击杀链（有输入窗必需）")
         # BGM 变体启动（0x405a20）：战斗 f200 起把曲名 '.' 位替换 'b' 变体并
         # 0x43afc0 播放——曲名表由音频系统解析 thbgm.fmt 产生（桩环境缺席，
         # 名字空 → strchr('.') 返 0 → 0x405b1d 裸写崩，hud-capture-plan §5.2
@@ -224,6 +244,26 @@ class BattleOracle(TitleOracle):
                                          self.rd32(esp)))
         self.uc.hook_add(UC_HOOK_CODE, on_4706c0,
                          begin=0x004706C0, end=0x004706C0)
+        # 结算/GameOver 覆盖层入口取证：调用者 + GameInf 模式/进度态。
+        def on_f570(uc, addr, size, ud):
+            esp = uc.reg_read(_ESP)
+            gameinf = self.rd32(GAMEINF)
+            sys.stderr.write(
+                "[f570] frame=%d caller=%08x g74=%d be81c=%d be7c8=%08x "
+                "be830=%08x\n"
+                % (self.frame, self.rd32(esp),
+                   self.rd32(gameinf + 0x74) if gameinf else -1,
+                   self.rd32(DAT_81C), self.rd32(0x004BE7C8),
+                   self.rd32(0x004BE830)))
+        self.uc.hook_add(UC_HOOK_CODE, on_f570,
+                         begin=0x0043F570, end=0x0043F570)
+        # 自机弹链取证：0x40e4d0（自机弹创建/绘制遍历）每帧调用计数。
+        self.shot_calls = 0
+
+        def on_shots(uc, addr, size, ud):
+            self.shot_calls += 1
+        self.uc.hook_add(UC_HOOK_CODE, on_shots,
+                         begin=0x0040E4D0, end=0x0040E4D0)
         # 指令环缓冲（TH13_TRACE=1 取证跑）：崩溃前指令轨迹回放。
         if os.environ.get("TH13_TRACE"):
             import collections
@@ -282,8 +322,12 @@ class BattleOracle(TitleOracle):
             return
         self.battle_loader_started = True
         self.phase = "battle_loader"
-        # ① 预开六档（窗C 十五轮验证清单；0x46df40 在 0x180 预置下非阻塞）
-        for slot, name in BATTLE_PREOPEN:
+        # ① 预开六档（窗C 十五轮验证清单，plXX 按角色定档——窗C 硬编码
+        # pl01 系其窗选角色 1；0x46df40 在 0x180 预置下非阻塞）
+        preopen = [(slot, PLAYER_ANM.get(self.character, "pl01.anm")
+                    if name == "pl01.anm" else name)
+                   for slot, name in BATTLE_PREOPEN]
+        for slot, name in preopen:
             nb = self.game_malloc(0x40)
             self.uc.mem_write(nb, name.encode("ascii") + b"\0")
             self.drive(ANM_OPEN, regs={"eax": slot, "ecx": nb},
@@ -389,6 +433,119 @@ class BattleOracle(TitleOracle):
             self.battle_loader_body()
 
     # ---------- 主流程 ----------
+    def _shot_probe_frame(self, battle_f):
+        """每帧落一行：碰撞调用/命中增量、自机弹池占用、敌机 life 快照。"""
+        if not (0 <= battle_f <= 340):
+            return
+        import struct as _struct
+        mgr = self.rd32(0x004C22A4)
+        pool_live = 0
+        pool_xy = []
+        if mgr:
+            for i in range(256):
+                node = mgr + 0x14 + i * 0x88
+                if self.rd32(node):
+                    pool_live += 1
+                    if len(pool_xy) < 4:
+                        pool_xy.append("(%d,%d)" % (
+                            _struct.unpack("<f", bytes(self.uc.mem_read(
+                                node + 0x14, 4)))[0],
+                            _struct.unpack("<f", bytes(self.uc.mem_read(
+                                node + 0x18, 4)))[0]))
+        enemies = []
+        ctl = self.rd32(0x004C2188)
+        if ctl:
+            node = self.rd32(ctl + 0xB0)
+            for _ in range(200):
+                if not node:
+                    break
+                base = self.rd32(node)
+                node = self.rd32(node + 4)
+                if not base:
+                    continue
+                vm = base + 0x11EC
+                life = _struct.unpack("<i", bytes(self.uc.mem_read(
+                    vm + 0x3F4C, 4)))[0]
+                x = _struct.unpack("<f", bytes(self.uc.mem_read(
+                    vm + 0x44, 4)))[0]
+                y = _struct.unpack("<f", bytes(self.uc.mem_read(
+                    vm + 0x48, 4)))[0]
+                dmg = _struct.unpack("<i", bytes(self.uc.mem_read(
+                    vm + 0x290, 4)))[0]
+                enemies.append("%x:L%d@(%d,%d)d%d"
+                               % (base & 0xFFFFF, life, x + 320, y + 16, dmg))
+                if len(enemies) >= 6:
+                    break
+                # life 写入哨兵：每个新敌机登记一次（M1.3a 伤害写入者定位）
+                if not hasattr(self, "_life_watched"):
+                    self._life_watched = set()
+                la = vm + 0x3F4C
+                if la not in self._life_watched and len(self._life_watched) < 40:
+                    self._life_watched.add(la)
+
+                    def on_life_write(uc, access, address, size, value, ud,
+                                      _la=la):
+                        eip = uc.reg_read(UC_X86_REG_EIP)
+                        self._shot_probe.write(
+                            "LIFEWRITE bf=%d addr=0x%08x size=%d "
+                            "value=0x%x EIP=0x%08x\n"
+                            % (self.frame - (self.battle_first or 0), _la,
+                               size, value & 0xFFFFFFFF, eip))
+                        return True
+                    self.uc.hook_add(UC_HOOK_MEM_WRITE, on_life_write,
+                                     begin=la, end=la)
+        if battle_f == 1:
+            for nm, a in (("be810_lives", 0x004BE810),
+                          ("be7c0_extra", 0x004BE7C0),
+                          ("dcc30_replay", 0x004DCC30),
+                          ("be814", 0x004BE814), ("be844", 0x004BE844)):
+                self._shot_probe.write("STATE bf=1 %s=0x%08x (%d)\n"
+                                       % (nm, self.rd32(a), self.rd32(a)))
+            gi = self.rd32(0x004C2194)
+            if gi:
+                self._shot_probe.write(
+                    "STATE bf=1 gameinf+0x60..0x90: %s\n" % " ".join(
+                        "%x:%x" % (o, self.rd32(gi + o))
+                        for o in range(0x60, 0x94, 4)))
+        if battle_f in (30, 65, 100, 150):
+            ctx = self.rd32(0x004C22C4)
+            lines = []
+            if ctx:
+                for i in range(256):
+                    node = ctx + 0x6A0 + i * 0x9C
+                    if not self.rd32(node + 0x70):
+                        continue
+                    rec = self.rd32(node + 0x94)
+                    fn = self.rd32(rec + 0x2C) if rec else 0
+                    dmg = _struct.unpack("<f", bytes(self.uc.mem_read(
+                        rec + 0x18, 4)))[0] if rec else 0.0
+                    opt = self.rd32(rec + 0x20) if rec else -1
+                    x = _struct.unpack("<f", bytes(self.uc.mem_read(
+                        node + 0x2C, 4)))[0]
+                    y = _struct.unpack("<f", bytes(self.uc.mem_read(
+                        node + 0x30, 4)))[0]
+                    lines.append("#%d rec=%08x fn2c=%08x dmg=%.1f opt=%d "
+                                 "pos=(%.0f,%.0f)"
+                                 % (i, rec, fn, dmg, opt, x + 320, y + 16))
+                    if len(lines) >= 6:
+                        break
+            self._shot_probe.write("SHOTS bf=%d: %s\n"
+                                   % (battle_f, " | ".join(lines) or "none"))
+        self._shot_probe.write(
+            "bf=%d calls=%d hits=%d pool=%d[%s] | %s | chain=%s | "
+            "power=%d step=%d flags830=%x st81c=%d\n"
+            % (battle_f,
+               self._s22_calls - self._last_s22_calls,
+               self._s22_hits - self._last_s22_hits,
+               pool_live, ",".join(pool_xy), " ".join(enemies),
+               " ".join("%x:%d" % (a, self._chain[a] - self._chain_last[a])
+                        for a in sorted(self._chain)),
+               self.rd32(0x004BE7E8), self.rd32(0x004BE7F0),
+               self.rd32(0x004BE830), self.rd32(0x004BE81C)))
+        self._last_s22_calls = self._s22_calls
+        self._last_s22_hits = self._s22_hits
+        self._chain_last = dict(self._chain)
+
     def run(self, frames=1200):
         self.install_overrides()
         self.init_ptd()
@@ -413,9 +570,76 @@ class BattleOracle(TitleOracle):
         out = open(self.out_path, "wb")
         t0 = time.time()
         battle_out = 0
+        model = None
+        model_misses = []
+        # TH13_SHOT_PROBE：0x422b20 敌机vs自机弹碰撞活性取证（M1.3a 伪死亡
+        # 根因链——首杀 f279 vs 原版 f109-130，疑自机弹零伤害）。
+        self._shot_probe = None
+        if os.environ.get("TH13_SHOT_PROBE"):
+            self._shot_probe = open(
+                "artifacts/tmp-scratch/battle-shot-probe.txt", "w")
+            self._s22_calls = 0
+            self._s22_hits = 0
+            self._last_s22_calls = 0
+            self._last_s22_hits = 0
+
+            def on_22b20(uc, addr, size, ud):
+                self._s22_calls += 1
+            self.uc.hook_add(UC_HOOK_CODE, on_22b20,
+                             begin=0x00422B20, end=0x00422B20)
+
+            # 自机弹链活性矩阵（M1.3a）：生成链/更新链/交互链逐帧计数。
+            self._chain = {a: 0 for a in (
+                0x00460D0, 0x00446000, 0x00445C40, 0x00445FA0,
+                0x0040E630, 0x00446F20, 0x00422CD0, 0x00446870,
+                0x00406580, 0x004065A0, 0x0040DB10,
+                0x00446CB0, 0x00447590, 0x004474A0, 0x00447510)}
+            self._chain_last = dict(self._chain)
+            self._retaddr_seen = set()
+
+            def on_chain(uc, addr, size, ud):
+                self._chain[addr] += 1
+                if addr in (0x00446000, 0x00446870) and addr not in \
+                        self._retaddr_seen:
+                    self._retaddr_seen.add(addr)
+                    ret = self.rd32(uc.reg_read(UC_X86_REG_ESP))
+                    sys.stderr.write(
+                        "RETADDR %08x called from %08x (bf=%d)\n"
+                        % (addr, ret,
+                           self.frame - (self.battle_first or 0)))
+            for a in self._chain:
+                self.uc.hook_add(UC_HOOK_CODE, on_chain, begin=a, end=a)
+
+            def on_460c50(uc, addr, size, ud):
+                ret = self.rd32(uc.reg_read(UC_X86_REG_ESP))
+                if 0x00422B20 <= ret < 0x00422C60:
+                    self._s22_hits += 1
+            self.uc.hook_add(UC_HOOK_CODE, on_460c50,
+                             begin=0x00460C50, end=0x00460C50)
+        if self.replay_stage:
+            from .replay_model import PlayerModel
+            sht = "pl%02d%s.sht" % (self.replay.character,
+                                    "a" if self.replay.shot_type == 0 else "b")
+            sht_path = os.path.join(self.raw_dir, sht)
+            if not os.path.isfile(sht_path):
+                self.fail("replay needs %s in raw dir" % sht)
+            model = PlayerModel(open(sht_path, "rb").read())
+            if os.environ.get("TH13_POS_LOG"):
+                self._pos_log = open(
+                    "artifacts/tmp-scratch/battle-player-pos.txt", "w")
         try:
             for self.frame in range(0, frames + 900):
-                self.frame_keys = frozenset()
+                if self.replay_stage and self.battle_first is not None:
+                    battle_f = self.frame - self.battle_first
+                    state = 0
+                    if battle_f >= 0:
+                        state = (self.replay_stage.frame(battle_f)[0]
+                                 if battle_f < self.replay_stage.frame_count
+                                 else 0)
+                    self.frame_keys = frozenset(
+                        vk for bit, vk in REPLAY_INPUT_VK if state & bit)
+                else:
+                    self.frame_keys = frozenset()
                 self.enemy_updates = 0
                 try:
                     self.title_frame(out)
@@ -445,6 +669,8 @@ class BattleOracle(TitleOracle):
                 if self.enemy_updates > 1:
                     self.enemy_update_audit.append(
                         (self.frame, self.enemy_updates))
+                if self._shot_probe is not None and self.battle_first is not None:
+                    self._shot_probe_frame(self.frame - self.battle_first)
                 if (self.battle_first is None and self.rd32(SCENE_CUR) == 7
                         and self.per_frame_ops[-1]):
                     self.battle_first = self.frame
@@ -452,21 +678,63 @@ class BattleOracle(TitleOracle):
                                      % (self.frame, self.per_frame_ops[-1]))
                 if self.battle_first is not None:
                     battle_out += 1
+                    # 逐帧玩家轨迹落盘（死亡时间线离线分析：冻结段=死亡，
+                    # 跳变回出生点=复活）。
+                    if model is not None and getattr(self, "_pos_log", None):
+                        player = self.rd32(0x004C22C4)
+                        if player:
+                            rx = struct.unpack(
+                                "<f", bytes(self.uc.mem_read(
+                                    player + 0x5B8, 4)))[0]
+                            ry = struct.unpack(
+                                "<f", bytes(self.uc.mem_read(
+                                    player + 0x5BC, 4)))[0]
+                            self._pos_log.write(
+                                "%d %.3f %.3f\n"
+                                % (self.frame - self.battle_first, rx, ry))
+                    # M1.2 闭环验证：真玩家管理器轨迹 vs 事件窗验证过的
+                    # python PlayerModel（同一输入流步进）——首分歧帧+偏差。
+                    if model is not None:
+                        battle_f = self.frame - self.battle_first
+                        state = (self.replay_stage.frame(battle_f)[0]
+                                 if battle_f < self.replay_stage.frame_count
+                                 else 0)
+                        model.step_move(state)
+                        player = self.rd32(0x004C22C4)
+                        if player:
+                            rx = struct.unpack(
+                                "<f", bytes(self.uc.mem_read(
+                                    player + 0x5B8, 4)))[0]
+                            ry = struct.unpack(
+                                "<f", bytes(self.uc.mem_read(
+                                    player + 0x5BC, 4)))[0]
+                            if (abs(rx - model.x) > 0.02
+                                    or abs(ry - model.y) > 0.02):
+                                if len(model_misses) < 8:
+                                    model_misses.append(
+                                        (battle_f, round(rx, 3), round(ry, 3),
+                                         round(model.x, 3),
+                                         round(model.y, 3)))
                     if battle_out % 120 == 0:
                         sys.stderr.write(
                             "battle +%d (f%d) ops=%d 418e00=%d vm %d/%d "
-                            "poolmalloc=%d bfile=%08x (%.1fs)\n"
+                            "poolmalloc=%d bfile=%08x in=%08x shots=%d "
+                            "(%.1fs)\n"
                             % (battle_out, self.frame, self.per_frame_ops[-1],
                                self.enemy_updates, self.vm_created,
                                self.vm_recycled, self.vm_pool_mallocs,
                                (lambda m: self.rd32(m + 0x9752B4)
                                 if m else 0)(self.rd32(0x004C2174)),
+                               self.rd32(0x004E49F0), self.shot_calls,
                                time.time() - t0))
                         t0 = time.time()
                     if battle_out >= frames:
                         break
         finally:
             out.close()
+            if getattr(self, "_pos_log", None):
+                self._pos_log.close()
+        self.model_misses_out = model_misses
         return 0
 
     # ---------- 截窗与自证 ----------
@@ -519,6 +787,12 @@ def main(argv):
             flags["--character"] = int(argv[i])
         elif arg == "--observe":
             flags["--observe"] = True
+        elif arg == "--replay":
+            i += 1
+            flags["--replay"] = argv[i]
+        elif arg == "--replay-stage":
+            i += 1
+            flags["--replay-stage"] = int(argv[i])
         else:
             positional.append(arg)
         i += 1
@@ -529,10 +803,29 @@ def main(argv):
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     oracle = BattleOracle(exe, raw_dir, out_path)
-    oracle.difficulty = flags.get("--difficulty", 1)
-    oracle.character = flags.get("--character", 0)
+    if "--replay" in flags:
+        from .replayfmt import ReplayFile
+        data = open(flags["--replay"], "rb").read()
+        oracle.replay = ReplayFile().decode(data)
+        stage_index = flags.get("--replay-stage", 0)
+        if stage_index >= len(oracle.replay.stages):
+            sys.stderr.write("--replay-stage out of range\n")
+            return 2
+        oracle.replay_stage = oracle.replay.stages[stage_index]
+        oracle.difficulty = oracle.replay.rank & 3
+        oracle.character = oracle.replay.character & 3
+        oracle.target_frames = frames = flags.get(
+            "--frames", min(1200, oracle.replay_stage.frame_count))
+        sys.stderr.write("REPLAY %s rank=%d char=%d stage=%d frames=%d\n"
+                         % (flags["--replay"], oracle.difficulty,
+                            oracle.character,
+                            oracle.replay_stage.number,
+                            oracle.replay_stage.frame_count))
+    else:
+        oracle.difficulty = flags.get("--difficulty", 1)
+        oracle.character = flags.get("--character", 0)
+        oracle.target_frames = frames = flags.get("--frames", 1200)
     oracle.observe = "--observe" in flags
-    oracle.target_frames = frames = flags.get("--frames", 1200)
     started = time.time()
     oracle.run(frames=frames)
     stats = oracle.cut_battle_window()
@@ -544,6 +837,12 @@ def main(argv):
     if stats["enemy_update_anomalies"]:
         print("0x418e00 anomalies (frame,count): %s"
               % stats["enemy_update_anomalies"])
+    if getattr(oracle, "_model_misses_shown", None) is None:
+        oracle._model_misses_shown = True
+    # run() 内收集的 model_misses 经属性透出（闭包变量在 run 返回后失效）
+    for miss in getattr(oracle, "model_misses_out", [])[:8]:
+        print("PLAYER-MODEL MISS battle_f=%d real=(%.3f,%.3f) model=(%.3f,%.3f)"
+              % miss)
     families = sorted(oracle.family_ops.items(), key=lambda kv: kv[1])
     print("capture families (tex → first battle frame):")
     for name, at in families[:24]:
