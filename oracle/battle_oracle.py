@@ -40,7 +40,8 @@ import time
 
 from unicorn import UcError, UC_HOOK_CODE, UC_HOOK_MEM_WRITE
 from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_EDI,
-                               UC_X86_REG_ESP, UC_X86_REG_EIP)
+                               UC_X86_REG_ESP, UC_X86_REG_EIP, UC_X86_REG_ECX,
+                               UC_X86_REG_ESI)
 
 from .title_oracle import (TitleOracle, SCENE_MGR, ANM_OPEN, ANM_MGR_CTOR,
                            BATTLE_PREOPEN)
@@ -116,6 +117,18 @@ class BattleOracle(TitleOracle):
         # 桩为 ret -1（登记：跳过 DAT_004be830|=0x100 与 [esi+0x14] 位写——
         # 音频标志面，窗口若在此分歧再启用真表解析）。
         self.m.override_call(0x00405A20, lambda mm: 0xFFFFFFFF, ret_pop=4)
+        # 帧率步进 0x476e00（x87 读 D3D caps [esi+0xc]+0x90——假设备该页未
+        # 映射）：纯等待/跳帧语义（void），GameOver 入口 0x43f570 链首次触达
+        # （M1.3b f1202 崩点）。空转桩（无状态写，时序域不在门禁内）。
+        self.m.override_call(0x00476E00, lambda mm: 0)
+        # 分期跳过（M1.3b → M4 登记）：0x43de80 GameOver/结算排行榜文字
+        # 渲染，其 CRT 块头校验链（0x47b16d→0x483652→0x47aee5 EINVAL 0x16）
+        # 在假 CRT 堆环境恒失败→返 NULL→0x43e2cb [0+0xc] 裸读崩。战斗窗
+        # （battle_f≤1200）该函数不被触达（f0-1202 零崩实证），全窗桩反而
+        # 破坏正常调用者（f4 0x052b7e70 裸跳实证）——改为 run() 帧循环在
+        # battle_f>1200 时按需挂桩（M1 战斗窗零干扰），M4 落地真 CRT 堆头
+        # 时移除。结算文字族以几何/纹理身份门禁（字体战役阶段2）；覆盖
+        # 矩阵登记「未捕获：结算排行文字族」。
         # 待复评（随 M1.2/M2 按需拆除，先登记）：0x419a90（击杀/掉落/计分
         # 链——有输入窗需要真实掉落）、0x461cb0/0x462450（弹体视觉 ANM
         # 挂接/步进——「合成 mgr 无实数据」的前提在全链路不成立）。
@@ -433,6 +446,13 @@ class BattleOracle(TitleOracle):
             self.battle_loader_body()
 
     # ---------- 主流程 ----------
+    def _mapped(self, addr):
+        try:
+            self.uc.mem_read(addr, 1)
+            return True
+        except Exception:
+            return False
+
     def _shot_probe_frame(self, battle_f):
         """每帧落一行：碰撞调用/命中增量、自机弹池占用、敌机 life 快照。"""
         if not (0 <= battle_f <= 340):
@@ -498,7 +518,9 @@ class BattleOracle(TitleOracle):
             for nm, a in (("be810_lives", 0x004BE810),
                           ("be7c0_extra", 0x004BE7C0),
                           ("dcc30_replay", 0x004DCC30),
-                          ("be814", 0x004BE814), ("be844", 0x004BE844)):
+                          ("be814", 0x004BE814), ("be844", 0x004BE844),
+                          ("be7b8_char", 0x004BE7B8),
+                          ("be7bc_shot", 0x004BE7BC)):
                 self._shot_probe.write("STATE bf=1 %s=0x%08x (%d)\n"
                                        % (nm, self.rd32(a), self.rd32(a)))
             gi = self.rd32(0x004C2194)
@@ -610,6 +632,94 @@ class BattleOracle(TitleOracle):
             for a in self._chain:
                 self.uc.hook_add(UC_HOOK_CODE, on_chain, begin=a, end=a)
 
+            # GameOver 排行渲染崩点现场取证（M1.3b f1213）：dump 操作数+双表基址
+            def on_rank_new_ret(uc, addr, size, ud):
+                sys.stderr.write("RANKNEW bf=%d new_eax=%08x\n"
+                                 % (self.frame - (self.battle_first or 0),
+                                    uc.reg_read(UC_X86_REG_EAX)))
+            self.uc.hook_add(UC_HOOK_CODE, on_rank_new_ret,
+                             begin=0x0043E28F, end=0x0043E28F)
+
+            def on_rank_call(uc, addr, size, ud):
+                esp = uc.reg_read(UC_X86_REG_ESP)
+                arg = self.rd32(esp)  # 已 push 的第 1 参
+                mem = b""
+                if self._mapped(arg):
+                    mem = bytes(uc.mem_read(arg, 24))
+                sys.stderr.write("RANKCALL bf=%d arg=%08x argbytes=%s\n"
+                                 % (self.frame - (self.battle_first or 0),
+                                    arg, mem.hex()))
+            self.uc.hook_add(UC_HOOK_CODE, on_rank_call,
+                             begin=0x0043E28A, end=0x0043E28A)
+
+            # 0x43e2cb 到达回溯：[esp]/[esp+4]/[esp+8] 返回链
+            def on_e2cb(uc, addr, size, ud):
+                esp = uc.reg_read(UC_X86_REG_ESP)
+                sys.stderr.write("E2CB bf=%d esp=%08x chain=%s\n"
+                                 % (self.frame - (self.battle_first or 0),
+                                    esp,
+                                    ["%08x" % self.rd32(esp + i * 4)
+                                     for i in range(6)]))
+            self.uc.hook_add(UC_HOOK_CODE, on_e2cb,
+                             begin=0x0043E2CB, end=0x0043E2CB)
+            # CRT 子堆链出口取证：0x483660=0x483652 的 errno+NULL 出口，
+            # 0x47a164=0x47a0ed 出口，0x47b193=0x47b16d ret。
+            for probe_addr, tag in ((0x00483660, "483652_NULL_EXIT"),
+                                    (0x0047A164, "47a0ed_exit"),
+                                    (0x0047B193, "47b16d_ret")):
+                def _mk(tag, pa):
+                    def cb(uc, addr, size, ud):
+                        sys.stderr.write("CRTTRACE bf=%d %s eax=%08x\n"
+                                         % (self.frame
+                                            - (self.battle_first or 0), tag,
+                                            uc.reg_read(UC_X86_REG_EAX)))
+                    return cb
+                self.uc.hook_add(UC_HOOK_CODE, _mk(tag, probe_addr),
+                                 begin=probe_addr, end=probe_addr)
+
+            # 指令级区间跟踪：CRT 分配链 5 段（TH13_CRT_TRACE=1 时启用，
+            # 逐指令 addr/eax/ecx/esi/edi，抓真流程）。
+            if os.environ.get("TH13_CRT_TRACE"):
+                ranges = ((0x47B16D, 0x47B1A0), (0x483652, 0x483690),
+                          (0x47FB09, 0x47FB60), (0x47AEE5, 0x47AF70),
+                          (0x47A0ED, 0x47A170))
+
+                def crt_step(uc, addr, size, ud):
+                    sys.stderr.write(
+                        "CRT bf=%d %08x eax=%08x ecx=%08x esi=%08x edi=%08x\n"
+                        % (self.frame - (self.battle_first or 0), addr,
+                           uc.reg_read(UC_X86_REG_EAX),
+                           uc.reg_read(UC_X86_REG_ECX),
+                           uc.reg_read(UC_X86_REG_ESI),
+                           uc.reg_read(UC_X86_REG_EDI)))
+                    self._crt_steps = getattr(self, "_crt_steps", 0) + 1
+                    if self._crt_steps > 4000:
+                        uc.emu_stop()
+                for lo, hi in ranges:
+                    self.uc.hook_add(UC_HOOK_CODE, crt_step,
+                                     begin=lo, end=hi)
+            self._ptd_hits = 0
+
+            def on_ptd_sib(uc, addr, size, ud):
+                self._ptd_hits += 1
+            self.uc.hook_add(UC_HOOK_CODE, on_ptd_sib,
+                             begin=0x0047FDE1, end=0x0047FDE1)
+
+            def on_rank_crash(uc, addr, size, ud):
+                eax = uc.reg_read(UC_X86_REG_EAX)
+                ecx = uc.reg_read(UC_X86_REG_ECX)
+                tcc = self.rd32(0x004C22CC)
+                tc8 = self.rd32(0x004C22C8)
+                sys.stderr.write(
+                    "RANKCRASH bf=%d eax=%08x ecx=%08x t22cc=%08x t22c8=%08x "
+                    "be7b8=%d be7bc=%d be7c4=%d ptd_sib_hits=%d\n"
+                    % (self.frame - (self.battle_first or 0), eax, ecx,
+                       tcc, tc8, self.rd32(0x004BE7B8),
+                       self.rd32(0x004BE7BC), self.rd32(0x004BE7C4),
+                       self._ptd_hits))
+            self.uc.hook_add(UC_HOOK_CODE, on_rank_crash,
+                             begin=0x0043E2CB, end=0x0043E2CB)
+
             def on_460c50(uc, addr, size, ud):
                 ret = self.rd32(uc.reg_read(UC_X86_REG_ESP))
                 if 0x00422B20 <= ret < 0x00422C60:
@@ -671,6 +781,19 @@ class BattleOracle(TitleOracle):
                         (self.frame, self.enemy_updates))
                 if self._shot_probe is not None and self.battle_first is not None:
                     self._shot_probe_frame(self.frame - self.battle_first)
+                # GameOver 后（结算窗范围）挂排行渲染分期桩（见 install_
+                # overrides 注释；M4 移除）。0x419a90 击杀链已拆，敌机生命
+                # 周期真跑后 GameOver 触达即挂。
+                if (self.battle_first is not None
+                        and not getattr(self, "_rank_stub_on", False)
+                        and self.frame - self.battle_first > 1200):
+                    # ret_pop=4：0x43de80 尾 ret 4（thiscall/单栈参），桩若
+                    # 不弹参会破坏任务链栈形状（f1205 0x470ca6 返回值裸跳
+                    # 实证）。
+                    self.m.override_call(0x0043DE80, lambda mm: 1,
+                                         ret_pop=4)
+                    self._rank_stub_on = True
+                    sys.stderr.write("RANK-STUB-ON frame=%d\n" % self.frame)
                 if (self.battle_first is None and self.rd32(SCENE_CUR) == 7
                         and self.per_frame_ops[-1]):
                     self.battle_first = self.frame
