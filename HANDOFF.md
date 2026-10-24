@@ -7,6 +7,28 @@
 > 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，
 > 分支 `port/th13`，贡献目标）。
 
+## 2026-10-24 M2.0 STD 舞台：机制链全活铁证 + 捕获缺口定位（进行中）
+
+- **推翻旧表象**：0x404b50（STD 主更新）/0x404140（视口组切换）/0x4042a0
+  （单面步进 ~12 面/帧）/0x467350（UP 裁剪+提交）/0x4679a0（flush→
+  DrawPrimitiveUP）**全链活跃**；视口组 B {32,16,384,448} 实测正常（与
+  0x43bbc0 锚点一致）；flush 顶点全在屏内（127-417,15-419）；stg1bg/
+  stg1bg2 纹理身份在 mgr slot4 已解析（TEXMAP 92 项含
+  background/stage01/stg1bg.png）。「walk 未产 op」的旧结论作废。
+- **缺口（待续）**：f30 单帧对账 465 次非空 flush vs 捕获面 33 个 up op
+  ——约 430 个 STD/动态面 UP 未进捕获。深探针四级闸门（entry_nz/
+  past_gate/at_9f3 全 465 通过）证明 flush 函数体全程执行、dev 调用
+  （0x467a56 `call eax`=vtable 0x14c）全部走到。**探针方法学缺陷已
+  澄清**：dev_up=0 的实例属性替换计数法无效（ComStubHost.method 注册
+  时绑定原函数引用，后续实例替换不影响 stub 分发）——**下一会话第一
+  事**：改用「在 _dev_draw_primitive_up 生成 op 处加 env 开关打印」
+  直接对账 flush↔op，定位 430 缺失 op 的吞没点（嫌疑：fake vtable
+  0x4dc6a8 指向对象的身份（0x01003000 vt=0x01002000，0x4679a0 的
+  0x10c/0x14c/0x164 调用走的是 vt 越界槽=运气 stub，还是真 dev 表）。
+- 探针工具：battle_oracle TH13_SHOT_PROBE 内 STD 段（404b50/404140/
+  42a0/467350/4670e0/flush 计数+视口 dump）；scripts 侧 slot4tex/upcount/
+  flushdeep 三探针（artifacts/tmp-scratch）。
+
 ## 2026-10-24 M1.3b GameOver 链修复五连 + M1.4 契约 v3 状态探针落地
 
 **M1.3b（提交 0c6d7fc）**：全窗长跑推进至 GameOver 入口链（f1202 首触
