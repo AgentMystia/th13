@@ -7,6 +7,22 @@
 > 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，
 > 分支 `port/th13`，贡献目标）。
 
+## 2026-10-24 M2.0 STD 舞台正式销账：捕获面无缺口，视觉差=port 消费侧
+
+- **终审（三探针闭环）**：①flush↔UP 对账 f30=19+10=29 无吞没；②
+  TEXBIND（0x467786 修正对齐）实证 STD 面绑定 8 纹理指针帧尾
+  refresh_tex_map 后**全部解析成功**——STD 面与 HUD/动态族**共用纹理
+  图集**（f10 的 16 个 front00.png up 即 STD 面纹理名——ANM 名与纹理
+  实体解耦，st01wl 面纹理在 front00 图集）；③op tex 生成时存指针 int
+  （`_tex_id` 惰性设计）、帧尾统一解析——「帧中 ???」是时序正常非缺失。
+- **结论重写**：oracle 捕获面**从未缺 STD**——旧台账 §七「残余真差=STD
+  舞台（oracle 两窗零 STD op）」的判断作废（旧窗统计按纹理名找 stg1bg
+  而 STD 面纹理名=front00 族）。**视觉差（墙艺不显示）的真根因=port
+  消费侧**：port 未消费/未绘制 STD 面 op——M2.0 战果=oracle 侧零改动，
+  修复面在 port（StageScenery/STD walk 的 port 侧重建，M2.5 关末链一并）。
+- 探针工具沉淀：TEXBIND/FFDIST/UPTRACE（op 生成处 env 开关）三件套
+  均入 artifacts/tmp-scratch，方法学两教训已录（上节）。
+
 ## 2026-10-24 M2.0 STD 舞台：机制链全活 + flush↔UP 对账闭环（探针累计 bug 侦破）
 
 - **机制链全活铁证**：0x404b50（STD 主更新）/0x404140（视口组切换，
