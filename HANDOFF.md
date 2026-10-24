@@ -7,6 +7,41 @@
 > 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，
 > 分支 `port/th13`，贡献目标）。
 
+## 2026-10-24 M1.3b GameOver 链修复五连 + M1.4 契约 v3 状态探针落地
+
+**M1.3b（提交 0c6d7fc）**：全窗长跑推进至 GameOver 入口链（f1202 首触
+0x43f570）。四层环境洋葱修复：①0x476e00 帧率步进空转桩（x87 读假 D3D
+caps 页未映射——纯等待语义）；②0x47fde1 ptd 兄弟访问器（C++ new 链
+0x483652 读 ptd+0x44 phd，未覆写→恒 NULL）；③分配族语义补全（HeapReAlloc/
+HeapSize/VirtualAlloc/LocalAlloc/GlobalAlloc——原默认桩返 0=分配失败）；
+④game_malloc 回收堆升级（first-fit 空闲表+合并+HeapFree 接线；原纯 bump
+每帧 ~140KB 不可持续）+ HEAP 128→384MB。
+- **f1213 结算排行渲染崩链定档**：0x43de80→0x47b16d（nothrow-new）→
+  0x483652→0x47aee5 CRT 块头校验恒 EINVAL(0x16)（假 CRT 堆环境无块头）→
+  返 NULL→0x43e2cb [0+0xc] 裸读。**分期登记 M4 W-RESULTS 第一任务**：
+  修复两路已备（真 CRT 堆头实现 / wine 自举真 scoreth13.dat——哑档 24B
+  已喂 raw 目录激活默认表 0x449760 路径，CreateFileA/WriteFile/CloseHandle
+  写档捕获桩已落 render_oracle，游戏自己的存档器 0x449e50 可驱动自举）。
+- 0x43de80 按需分期桩（battle_f>1200 挂，ret_pop=4 thiscall 形状——ret 0
+  版 f1205 0x470ca6 任务链裸跳实证形状要求）。
+- **战斗窗（f0-1202）全窗零崩**，GameOver 前 1210 战斗帧稳定捕获
+  （ops[min=9 max=438 total=283492]）。
+- 残余谜题登记（待 M4 复核）：f1213 桩在位时 0x43e28f 仍到达且
+  new 返 0（probe4 铁证），probe2/3（无 0x43e28f hook）不崩——hook 拓扑
+  影响 unicorn 执行流的机理未明；f1213 的到达路径（不经 0x43de80 入口的
+  排行循环执行）未定位。M4 修复真 CRT 堆头后该谜题自然消解。
+
+**M1.4 事件契约 v3 状态探针（TH13_STATE_LOG=1 → battle-state-v3.jsonl）**：
+battle_oracle 帧循环每战斗帧一行 JSONL：score/graze（ctl+0x28/+0x24，
+0x419a90:123/132 计分写点反推）、残机/灵击（0x4be810/0x4be814，0x427910
+HUD 引用实证；值源=scoreth13.dat [diff*0x118+0x18]（0x42b990:93）——哑档
+下为默认表占位 100000，M4 真档自举后自然修正）、power/step、按键集。
+验证：400 帧 399 行、score f41=15 起涨（神霊收集分）、keys 逐帧正确。
+draw v2 的 src 字段顺延 M2.3 ctx 桶定档时一并落（派生语义依赖 0x4032d0
+五桶），verts 哈希为体积优化非阻塞——现有逐顶点比对已覆盖。
+
+
+
 ## 2026-10-24 M1.3a 死亡时间线终审：f278「伪死亡」勘误为**真死亡**——全链忠实叙事闭环
 
 **结论：battle_oracle 对局窗自 f0 起与原局（rpy+速通视频交叉验证）行为一致；

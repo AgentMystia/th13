@@ -594,6 +594,10 @@ class BattleOracle(TitleOracle):
         battle_out = 0
         model = None
         model_misses = []
+        self._state_log = None
+        if os.environ.get("TH13_STATE_LOG"):
+            self._state_log = open(
+                "artifacts/tmp-scratch/battle-state-v3.jsonl", "w")
         # TH13_SHOT_PROBE：0x422b20 敌机vs自机弹碰撞活性取证（M1.3a 伪死亡
         # 根因链——首杀 f279 vs 原版 f109-130，疑自机弹零伤害）。
         self._shot_probe = None
@@ -794,6 +798,26 @@ class BattleOracle(TitleOracle):
                                          ret_pop=4)
                     self._rank_stub_on = True
                     sys.stderr.write("RANK-STUB-ON frame=%d\n" % self.frame)
+                # 事件契约 v3 状态探针（plan §L1）：每战斗帧一行 JSONL——
+                # score/graze（0x419a90:123/132 计分写点反推：ctl+0x28/+0x24）、
+                # 残机/灵击（0x4be810/0x4be814——0x427910 HUD 引用实证；
+                # 值源=scoreth13.dat [diff*0x118+0x18]（0x42b990:93），哑档
+                # 下为默认表占位 100000，M4 真档自举后自然修正）、power/
+                # step（0x4be7e8/f0）、按键集。Boss HP 探针随 M2 ctx 桶加。
+                if getattr(self, "_state_log", None) and self.battle_first:
+                    battle_f = self.frame - self.battle_first
+                    ctl = self.rd32(0x004C2188)
+                    row = {"frame": battle_f,
+                           "score": self.rd32(ctl + 0x28) if ctl else 0,
+                           "graze": self.rd32(ctl + 0x2C) if ctl else 0,
+                           "lives": self.rd32(0x004BE810),
+                           "bombs": self.rd32(0x004BE814),
+                           "power": self.rd32(0x004BE7E8),
+                           "pstep": self.rd32(0x004BE7F0),
+                           "keys": sorted(self.frame_keys)}
+                    self._state_log.write(
+                        json.dumps(row, ensure_ascii=True,
+                                   separators=(",", ":")) + "\n")
                 if (self.battle_first is None and self.rd32(SCENE_CUR) == 7
                         and self.per_frame_ops[-1]):
                     self.battle_first = self.frame
@@ -857,6 +881,8 @@ class BattleOracle(TitleOracle):
             out.close()
             if getattr(self, "_pos_log", None):
                 self._pos_log.close()
+            if getattr(self, "_state_log", None):
+                self._state_log.close()
         self.model_misses_out = model_misses
         return 0
 
