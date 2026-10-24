@@ -530,6 +530,31 @@ class BattleOracle(TitleOracle):
                         "%x:%x" % (o, self.rd32(gi + o))
                         for o in range(0x60, 0x94, 4)))
         if battle_f in (30, 65, 100, 150):
+            # STD 实例数探针（M2.0）：0x404140 门 [ctx+0x1915c]。
+            std_ctx = self.rd32(0x004DCC18)
+            n1915c = (self.rd32(std_ctx + 0x1915C)
+                      if std_ctx and self._mapped(std_ctx + 0x1915C) else -1)
+            vp = None
+            for blk in (0x004DC9D0, 0x004DC8AC):
+                if self._mapped(blk + 0xE8):
+                    vp = (blk, [self.rd32(blk + off)
+                                for off in (0xD8, 0xDC, 0xE0, 0xE4)])
+            self._shot_probe.write(
+                "STD bf=%d 404b50=%d 404140=%d 42a0=%d 467350=%d 4670e0=%d "
+                "flush=%d(nz=%d) dcc18=%08x n1915c=%d vp=%s\n"
+                % (battle_f,
+                   self._std_calls - self._std_last,
+                   self._std_4140,
+                   self._std_42a0,
+                   self._std_467350,
+                   self._std_670e0,
+                   self._std_flush,
+                   self._flush_nonzero,
+                   std_ctx, n1915c, vp))
+            self._std_670e0 = 0
+            self._std_flush = 0
+            self._flush_nonzero = 0
+            self._std_last = self._std_calls
             ctx = self.rd32(0x004C22C4)
             lines = []
             if ctx:
@@ -635,6 +660,64 @@ class BattleOracle(TitleOracle):
                            self.frame - (self.battle_first or 0)))
             for a in self._chain:
                 self.uc.hook_add(UC_HOOK_CODE, on_chain, begin=a, end=a)
+
+            # STD 舞台活性取证（M2.0）：0x404b50=STD 主更新（装载器 0x4065a0
+            # 构造后注册的任务）、0x404140=视口组切换+单面 walk、0x4042a0=
+            # STD 面步进。每帧计数 + ctx 探针。
+            self._std_calls = 0
+            self._std_4140 = 0
+            self._std_last = 0
+
+            def on_std(uc, addr, size, ud):
+                if addr == 0x00404B50:
+                    self._std_calls += 1
+                else:
+                    self._std_4140 += 1
+            self.uc.hook_add(UC_HOOK_CODE, on_std,
+                             begin=0x00404B50, end=0x00404B50)
+            self.uc.hook_add(UC_HOOK_CODE, on_std,
+                             begin=0x00404140, end=0x00404140)
+            self._std_42a0 = 0
+            self._std_467350 = 0
+
+            def on_std2(uc, addr, size, ud):
+                if addr == 0x004042A0:
+                    self._std_42a0 += 1
+                else:
+                    self._std_467350 += 1
+            self.uc.hook_add(UC_HOOK_CODE, on_std2,
+                             begin=0x004042A0, end=0x004042A0)
+            self.uc.hook_add(UC_HOOK_CODE, on_std2,
+                             begin=0x00467350, end=0x00467350)
+            self._std_670e0 = 0
+
+            def on_std3(uc, addr, size, ud):
+                self._std_670e0 += 1
+            self.uc.hook_add(UC_HOOK_CODE, on_std3,
+                             begin=0x004670E0, end=0x004670E0)
+            self._std_flush = 0
+            self._flush_nonzero = 0
+
+            def on_flush(uc, addr, size, ud):
+                self._std_flush += 1
+                esi = uc.reg_read(UC_X86_REG_ESI)
+                n = self.rd32(esi + 0xB781F0)
+                if n:
+                    self._flush_nonzero += 1
+                    bf = self.frame - (self.battle_first or 0)
+                    if bf in (30, 65) and getattr(self, "_flush_dumped", 0) < 6:
+                        self._flush_dumped = \
+                            getattr(self, "_flush_dumped", 0) + 1
+                        buf = self.rd32(esi + 0xEF81F8)
+                        import struct as _s
+                        v = _s.unpack("<2f", bytes(uc.mem_read(buf, 8)))
+                        sys.stderr.write(
+                            "FLUSH bf=%d n=%d buf=%08x v0=(%.1f,%.1f) "
+                            "tex=%08x\n"
+                            % (bf, n, buf, v[0], v[1],
+                               self.rd32(esi + 0xB78188)))
+            self.uc.hook_add(UC_HOOK_CODE, on_flush,
+                             begin=0x004679A0, end=0x004679A0)
 
             # GameOver 排行渲染崩点现场取证（M1.3b f1213）：dump 操作数+双表基址
             def on_rank_new_ret(uc, addr, size, ud):
