@@ -463,6 +463,15 @@ class FakeD3D:
         }
         self.frame_ops.append(op)
         self.stats["ups"] += 1
+        # M2.0 对账探针（TH13_UP_TRACE=1）：每次假设备 UP 生成时打印
+        # layer/纹理/顶点首坐标——flush(0x4679a0)↔op 逐次对账定位
+        # STD/动态面 UP 吞没点。
+        if os.environ.get("TH13_UP_TRACE"):
+            v0 = op["verts"][0][:2] if op["verts"] else ["-", "-"]
+            sys.stderr.write(
+                "UPTRACE f=%s L%s tex=%s count=%d v0=(%s,%s)\n"
+                % (getattr(self.ro, "frame", "?"), op["layer"], op["tex"],
+                   op["count"], v0[0], v0[1]))
         import os as _os
         if _os.environ.get("TH13_TFACTOR_PROBE"):
             import sys as _sys

@@ -7,6 +7,29 @@
 > 工作区：`/home/mystia/项目/th13/`（外层工具仓）与 `eagler-touhou/`（monorepo，
 > 分支 `port/th13`，贡献目标）。
 
+## 2026-10-24 M2.0 STD 舞台：机制链全活 + flush↔UP 对账闭环（探针累计 bug 侦破）
+
+- **机制链全活铁证**：0x404b50（STD 主更新）/0x404140（视口组切换，
+  B 组 {32,16,384,448} 实测正常）/0x4042a0（单面步进）/0x467350（UP
+  裁剪+提交）/0x4679a0（flush→DrawPrimitiveUP）全程活跃；flush 顶点
+  全在屏内。**旧「walk 未产 op」表象作废**。
+- **flush↔UP 对账闭环**：f30 帧 STD flush=19 次、假设备 UP 总 29（19
+  STD+10 其他族）——**捕获面无吞没**。此前「465 flush vs 33 up」的
+  巨大缺口是**探针累计 bug**（FFINAL 探针的计数器跨帧累计未按帧清零，
+  FFDIST 按帧分布侦破：f1=6/f4-13=15/f23-30≈19-21，累计恰=465）。
+- **dev_obj/vt 链终审正确**：0x4dc6a8=0x01003000=FakeD3D dev_obj ✓
+  （0x45df07 `push 0x4dc6a8`=CreateDevice out 直写）；vt 0x14c 槽=
+  DrawPrimitiveUP stub（期望值逐位吻合）。深探针四级闸门全过。
+- **探针方法学两条教训**：①实例属性替换计数法对 ComStubHost stub
+  无效（注册时已绑定原函数引用）——用 op 生成处 env 开关（TH13_
+  UP_TRACE 已入 render_oracle）；②跨帧累计计数器必须按帧清零。
+- **唯一未决（下会话 10 分钟级）**：stg1bg/stg1bg2 纹理身份在 mgr
+  slot4 已解析（TEXMAP 92 项含之）但 60 帧 op 里未出现——STD 面的
+  SetTexture 绑定走 mgr+0xb78188（0x467785 `mov [esi+0xb78188],eax`
+  传纹理指针）——挂「0xb78188 写值=stg1bg 档纹理？」探针定档 STD 面
+  实际纹理来源；若 STD 面纹理本就解析为 front00 族（1072 up/60帧
+  含量大族），则 STD 面已在捕获面、M2.0 直接销账。
+
 ## 2026-10-24 M2.0 STD 舞台：机制链全活铁证 + 捕获缺口定位（进行中）
 
 - **推翻旧表象**：0x404b50（STD 主更新）/0x404140（视口组切换）/0x4042a0
