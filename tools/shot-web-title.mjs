@@ -89,13 +89,15 @@ await page.waitForFunction(() => window.mod && window.mod._th13_frame() >= 420, 
 
 const curFrame = await page.evaluate(() => window.mod._th13_frame());
 console.log('Current game frame reached:', curFrame);
+console.log('Current game phase:', await page.evaluate(() => window.mod._th13_phase()));
 
 // 等待 500ms 让画面刷新稳定
 await page.waitForTimeout(500);
 
 const canvas = await page.$('#canvas');
 if (canvas) {
-  const outPath = join(root, 'artifacts/web-title-current.png');
+  // MENU_SHOT_OUT：输出重定向（新会话写各自 ignored 目录，避免覆写历史基线图）。
+  const outPath = process.env.MENU_SHOT_OUT || join(root, 'artifacts/web-title-current.png');
   await canvas.screenshot({path: outPath});
   console.log('Saved screenshot via playwright to', outPath);
 } else {
