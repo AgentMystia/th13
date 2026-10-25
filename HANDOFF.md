@@ -9,9 +9,23 @@ make exec CMD='python3 scripts/verify.py resume'
 
 机器返回的任务卡、依赖和当前证据决定可做什么。`verification/README.md` 定义操作协议；[已批准架构](docs/plans/autonomous-refactor-2026-10-24.md) 定义技术路线，不代表实现已完成。
 
-## 当前状态（由运行证据更新）
+## 2026-10-25 菜单主批次已提交（monorepo 16bdc103）
 
-基础重构施工中；尚未在本轮认证任何游戏还原窗口。机器交接由 `python3 scripts/verify.py handoff` 生成于 `artifacts/verification/`。本段在 runner 和门禁完成后替换为实际报告引用，不能用这段文字跳过 `resume`。
+- **Practice 全流程实装**（原版 0x44cd10/0x44dcd4/0x449360/0x451cb0 证据）：mode=0x10、
+  screen8 六关选关、真实 played 位锁定、确认音 16/7+50；旧 SessionState 注释
+  "Practice=Extra" 已纠正。
+- **th13_replay_import_error 悬垂指针修复**（BrowserRuntime.cpp 函数级 static
+  快照）+ 浏览器生命周期回归（web/tests/sdl/replay-import-error.lifetime.test.mjs）。
+- **UI 测试进程修复**：spawnSync 1MiB maxBuffer ENOBUFS 根因实证；新
+  `tools/run-child.mjs`（fd 落盘+进程组超时）；`tests/ui/run.sh` compile-once
+  （74 TU 一次编译，全量 ~385s→~35s）。
+- 双仓均已提交（外层 3dd2822 / monorepo 16bdc103）；UI 套件 138 ok，18 个
+  失败经逐一 diff 确认为 HEAD 基线既有（pause count 5 vs 测试期望 3 等），
+  非本批引入。
+- **下批候选**：①修 18 个基线既有失败中真实过期断言（pause_test 期望值 vs
+  PauseMenu::configure_entries count=5 实际）；②Extra 无条件禁用 → 按
+  0x44c570 case0 +0x5c40 bit1 解锁门实装；③browser smoke 扩展 Practice
+  全链路（现仅基线 smoke 覆盖普通开局）。
 
 ## 人工注意事项（不改变机器状态）
 
