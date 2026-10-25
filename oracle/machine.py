@@ -18,10 +18,8 @@ PAGE = 0x1000
 STACK_TOP = 0x00300000
 STACK_SIZE = 0x00100000
 HEAP_BASE = 0x01000000
-# 384MB：128MB 在全窗 replay 战斗（f1215 GameOver 排行渲染时 bump 已越
-# 0x09000000 端发未映射地址——M1.3b 实测 new_eax=0x0c0451a0）。真机
-# Windows 堆远大于此，扩容即恢复语义（前一档 64MB→128MB 同理，见下注）。
-HEAP_SIZE = 0x18000000
+# 战斗装载需要超过 64MB；分配器必须在耗尽时显式失败。
+HEAP_SIZE = 0x08000000
 TEB_ADDR = 0x7FFDE000
 STUB_BASE = 0xF0000000      # 每个导入一个 16 字节桩槽
 RET_MAGIC = 0xF1000000      # call() 的哨兵返回地址

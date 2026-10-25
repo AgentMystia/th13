@@ -1,0 +1,1361 @@
+{
+  "schema": 1,
+  "tasks": [
+    {
+      "allowed": [
+        "scripts/verify.py",
+        "scripts/test_verify.py",
+        "scripts/task_configure.py",
+        "scripts/test_task_configure.py",
+        "scripts/verify_delivery.py",
+        "scripts/test_delivery.py",
+        "verification/README.md",
+        "verification/README-autonomy.md",
+        "verification/full-game-scenes.json"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "scripts",
+              "-p",
+              "test_*.py",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "autonomy-unit-controls",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "scripts",
+              "-p",
+              "test_*.py",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "autonomy-unit-controls-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/check_project_contract.py"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "autonomy-project-contract",
+            "result_type": "TOOL_PASS",
+            "timeout": 60,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [],
+      "evidence": [
+        "受审维护开始/归还与原owner基线保留证据",
+        "配置、机制复核、维护和严格交付正负控",
+        "缺独立适配器仍BLOCKED"
+      ],
+      "goal": "落实用户2026-10-24授权的自主开发工具修复：默认GLM主会话无需工作流即可接手、配置未来卡、机制复核、受审维护续跑及严格交付验证；不以工具完成冒充Demo达标。",
+      "id": "autonomy-tooling",
+      "inputs": [
+        "scripts/verify.py",
+        "scripts/test_verify.py",
+        "scripts/task_configure.py",
+        "scripts/test_task_configure.py",
+        "scripts/verify_delivery.py",
+        "scripts/test_delivery.py",
+        "scripts/check_project_contract.py",
+        "scripts/verification_lib",
+        "verification/README.md",
+        "verification/README-autonomy.md",
+        "verification/full-game-scenes.json"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不降低五道门、改golden或容差",
+        "不修产品或原版世界，不手改任务DONE",
+        "工作流仅本次演练，不成为默认开发依赖"
+      ],
+      "protected": [
+        "verification/policy.json",
+        "verification/tasks.json",
+        "oracle",
+        "eagler-touhou"
+      ],
+      "read": [
+        "AGENTS.md",
+        "verification/README.md",
+        "scripts/verify.py",
+        "scripts/test_verify.py",
+        "artifacts/verification/runner-pending",
+        "artifacts/verification/task-configure-pending",
+        "artifacts/verification/autonomy-pending",
+        "artifacts/verification/tool-repair-ready"
+      ],
+      "stop": "工具失败只修本卡；保持原owner失败和基线。未通过Stage1严格交付门及真实可访问Demo不宣布框架成熟。"
+    },
+    {
+      "allowed": [
+        "scripts/verify.py",
+        "scripts/verification_lib",
+        "verification",
+        "scripts/test_verify.py"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "scripts",
+              "-p",
+              "test_verify.py",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "runner-negative-controls",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "scripts",
+              "-p",
+              "test_verify.py",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "runner-negative-controls-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/check_project_contract.py"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "project-contract",
+            "result_type": "TOOL_PASS",
+            "timeout": 60,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [],
+      "evidence": [
+        "本修订 fast 和 full 的闭合进程 receipt",
+        "硬链接、共截断/缺帧、错误退出、过滤、锁/中断、过期、越权、策略变更及伪绿负控"
+      ],
+      "goal": "完成容器专用验收入口、严格状态机、证据协议、任务图及定向负控；仅认证工具，不认证游戏或框架最终有效性。",
+      "id": "foundation-runner",
+      "inputs": [
+        "scripts/verify.py",
+        "scripts/verification_lib",
+        "verification",
+        "scripts/test_verify.py",
+        "scripts/check_project_contract.py"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不修改产品、比较器、AGENTS 或 HANDOFF",
+        "不认证 Replay、完整捕获、Stage1、后端或全游戏",
+        "不得用 TOOL_PASS 声称 CPA 已完成正确 Stage1 全链路"
+      ],
+      "protected": [
+        "oracle",
+        "eagler-touhou",
+        "scripts/check_project_contract.py"
+      ],
+      "read": [
+        "AGENTS.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md",
+        "scripts/verify.py",
+        "scripts/verification_lib",
+        "verification",
+        "scripts/test_verify.py"
+      ],
+      "stop": "工具/环境失败只修授权工具；最多三修订，超限保留复现进入机制复核；不得因游戏未认证降低工具门禁。"
+    },
+    {
+      "allowed": [
+        "oracle/battle_oracle.py",
+        "oracle/draw_compare.py",
+        "oracle/machine.py",
+        "oracle/render_oracle.py",
+        "oracle/stage1_compare.py",
+        "oracle/battle_startup_check.py",
+        "oracle/test_tool_compare.py",
+        "oracle/test_capture_integrity.py",
+        "scripts/audit_baselines.py",
+        "eagler-touhou/ports/th13/portable/build.mjs",
+        "eagler-touhou/ports/th13/portable/build-harness.mjs",
+        "eagler-touhou/ports/th13/portable/build.test.mjs",
+        "eagler-touhou/ports/th13/tools/run-harness.mjs",
+        "eagler-touhou/ports/th13/tools/harness-paths.mjs",
+        "eagler-touhou/ports/th13/tests/harness-paths.test.mjs",
+        "eagler-touhou/ports/th13/tools/replay-verifier/run-gate.mjs",
+        "eagler-touhou/ports/th13/tools/replay-verifier/gate-protocol.mjs",
+        "eagler-touhou/ports/th13/tools/replay-verifier/gate-protocol.test.mjs"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "oracle.test_tool_compare",
+              "oracle.test_capture_integrity",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "compare-tests",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "eagler-touhou/ports/th13/portable/build.test.mjs",
+              "eagler-touhou/ports/th13/tools/replay-verifier/gate-protocol.test.mjs",
+              "eagler-touhou/ports/th13/tests/harness-paths.test.mjs"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "build-gate-tests",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "oracle.test_tool_compare",
+              "oracle.test_capture_integrity",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "compare-tests-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "eagler-touhou/ports/th13/portable/build.test.mjs",
+              "eagler-touhou/ports/th13/tools/replay-verifier/gate-protocol.test.mjs",
+              "eagler-touhou/ports/th13/tests/harness-paths.test.mjs"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "build-gate-tests-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "portable/build-harness.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "wasi-build",
+            "result_type": "TOOL_PASS",
+            "timeout": 1200,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [
+        "foundation-runner"
+      ],
+      "evidence": [
+        "既有比较/build工具定向正负控、真实退出码、结构结果与输入身份receipt"
+      ],
+      "goal": "完善既有比较器及构建工具的退出码、输入路径、捕获完整性与结构结果协议；不认证游戏 fidelity。",
+      "id": "tool-protocol",
+      "inputs": [
+        "oracle",
+        "eagler-touhou/ports/th13/portable/build.mjs",
+        "eagler-touhou/ports/th13/tools"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "legacy DrawCapture 或假设备清单不能认证网页",
+        "不修改共享 th15 后端或比较判据"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "verification/README.md",
+        "oracle/test_tool_compare.py",
+        "oracle/test_capture_integrity.py",
+        "eagler-touhou/ports/th13/portable/build.test.mjs",
+        "eagler-touhou/ports/th13/tests/harness-paths.test.mjs"
+      ],
+      "stop": "缺真实命令/产物协议则 BLOCKED，禁止文档或源码存在充当运行通过。"
+    },
+    {
+      "allowed": [
+        "eagler-touhou/ports/th13/web/cpp/game/RenderSubmission.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/SubmissionTrace.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/DrawCapture.cpp",
+        "eagler-touhou/ports/th13/web/cpp/game/DrawCapture.hpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/GraphicsDevice.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/GraphicsDevice.hpp",
+        "scripts/submission_capture_check.mjs",
+        "eagler-touhou/ports/th13/web/cpp/game/TitleFrame.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/BrowserRuntime.cpp",
+        "eagler-touhou/ports/th13/tests/submission",
+        "eagler-touhou/ports/th13/tests/submission.test.mjs",
+        "eagler-touhou/ports/th13/tests/anm.test.mjs",
+        "scripts/web_draws_capture.mjs",
+        "scripts/submission_capture_check.test.mjs",
+        "eagler-touhou/ports/th13/web/cpp/sdl/Application.cpp",
+        "verification/tasks.json",
+        "verification"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "eagler-touhou/ports/th13/tests/submission.test.mjs",
+              "scripts/submission_capture_check.test.mjs"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "submission-controls",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "eagler-touhou/ports/th13/tests/submission.test.mjs",
+              "scripts/submission_capture_check.test.mjs"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "submission-controls-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/*.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "native-and-node",
+            "result_type": "TOOL_PASS",
+            "timeout": 1800,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "portable/build-harness.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "wasi-production-build",
+            "result_type": "TOOL_PASS",
+            "timeout": 1200,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "portable/build.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "web-production-build",
+            "result_type": "TOOL_PASS",
+            "timeout": 1800,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "env",
+              "TH13_WEB_CAPTURE=1",
+              "node",
+              "portable/build.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "web-capture-build",
+            "result_type": "TOOL_PASS",
+            "timeout": 1800,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [
+        "tool-protocol"
+      ],
+      "evidence": [
+        "实际生产提交正负控与真实双目标/捕获构建；浏览器数值与独立原版资格仍需后续任务"
+      ],
+      "goal": "真实生产提交与 trace 共用有效状态、几何及资源入口；验证捕获开关不改变生产输出、旁路可检出、错误可传播。",
+      "id": "submission-boundary",
+      "inputs": [
+        "eagler-touhou/ports/th13/web/cpp/game/RenderSubmission.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/SubmissionTrace.hpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/GraphicsDevice.cpp",
+        "scripts/submission_capture_check.mjs",
+        "eagler-touhou/ports/th13/web/cpp/game/TitleFrame.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/BrowserRuntime.cpp",
+        "eagler-touhou/ports/th13/tests/submission"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "legacy DrawCapture 或假设备清单不能认证网页",
+        "不修改共享 th15 后端或比较判据"
+      ],
+      "protected": [
+        "verification/policy.json",
+        "verification/README.md",
+        "oracle",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md",
+        "eagler-touhou/ports/th13/web/cpp/game/RenderSubmission.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/SubmissionTrace.hpp",
+        "scripts/submission_capture_check.mjs",
+        "eagler-touhou/ports/th13/web/cpp/game/TitleFrame.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/BrowserRuntime.cpp",
+        "eagler-touhou/ports/th13/tests/submission"
+      ],
+      "stop": "缺真实命令/产物协议则 BLOCKED，禁止文档或源码存在充当运行通过。"
+    },
+    {
+      "allowed": [],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/handoff_drill.py"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "handoff-refusal-controls",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/handoff_drill.py"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "handoff-refusal-controls-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [
+        "submission-boundary"
+      ],
+      "evidence": [
+        "固定拒绝/续跑负控；指定 CPA 实际模型身份和派发由工作流运行记录独立核对，不由此TOOL_PASS自报"
+      ],
+      "goal": "指定 CPA new-provider/zai-glm-5-3 不读历史聊天，仅由入口选卡、拒绝伪绿、生成可恢复交接；此演练仅为工具资格。",
+      "id": "handoff-drill",
+      "inputs": [
+        "verification/policy.json",
+        "scripts/verify.py",
+        "scripts/handoff_drill.py"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不自动创建重复工作流",
+        "演练通过不等于框架最终有效；必须继续到正确 Stage1 全链路"
+      ],
+      "protected": [
+        "verification",
+        "scripts",
+        "oracle",
+        "eagler-touhou"
+      ],
+      "read": [
+        "AGENTS.md",
+        "verification/README.md",
+        "verification/tasks.json",
+        "docs/plans/autonomous-refactor-2026-10-24.md"
+      ],
+      "stop": "提供方故障不换账户；用户取消不自动恢复；缺实际 CPA 演练门禁则 BLOCKED。"
+    },
+    {
+      "allowed": [
+        "oracle/replayfmt.py",
+        "oracle/battle_oracle.py",
+        "oracle/test_replay_qualification.py",
+        "eagler-touhou/ports/th13/web/cpp/game/ReplayFile.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/ReplayFile.cpp",
+        "eagler-touhou/ports/th13/tests/replay/replay_test.cpp"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/check_replay_mechanism.py"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "replay-original-mechanism",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "oracle.test_replay_qualification",
+              "oracle.test_tool_compare",
+              "oracle.test_capture_integrity",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "replay-qualification-controls",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/check_replay_mechanism.py"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "replay-original-mechanism-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "oracle.test_replay_qualification",
+              "oracle.test_tool_compare",
+              "oracle.test_capture_integrity",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "replay-qualification-controls-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 180,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/replay.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "replay-native",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [
+        "handoff-drill"
+      ],
+      "evidence": [
+        "原版函数/数据锚点、最小实验执行结果及未知项；不能只验文档存在"
+      ],
+      "goal": "复用固定原版0x449070/0x448200实验，保留Python/C++完整0xc4 stage头及raw初值；修battle oracle以真实Replay恢复/消费路径初始化而非默认种子+held注入，并用原版输入消费点日志证明相位。新增有正负控的test_replay_qualification；产出仍只是资格机制基础，完整主线另验。",
+      "id": "replay-qualification-research",
+      "inputs": [
+        "games/th13/th13.exe",
+        "games/replays/th13_01.rpy",
+        "games/replays/th13_udSr01.rpy",
+        "scripts/check_replay_mechanism.py",
+        "artifacts/decomp/jp/functions/00449070.c",
+        "artifacts/decomp/jp/functions/00448200.c",
+        "artifacts/decomp/jp/functions/00414f30.c"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "研究完成不等于原版参考资格认证",
+        "不让 port 迎合错误 oracle"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "scripts/check_replay_mechanism.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "scripts/check_replay_mechanism.py",
+        "oracle/replayfmt.py",
+        "oracle/battle_oracle.py",
+        "eagler-touhou/ports/th13/web/cpp/game/ReplayFile.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/ReplayFile.cpp",
+        "artifacts/decomp/jp/functions/00449070.c",
+        "artifacts/decomp/jp/functions/00448200.c",
+        "artifacts/decomp/jp/functions/00414f30.c",
+        "artifacts/decomp/jp/functions/0042b990.c",
+        "artifacts/verification/replay-init-probe.py",
+        "artifacts/verification/replay_init_probe_result.json"
+      ],
+      "stop": "具体只读原版锚点/文件所有权/研究执行门禁未定，禁止无边界探索。"
+    },
+    {
+      "allowed": [
+        "scripts/check_replay_certification.py"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "scripts/check_replay_certification.py",
+              "--selfcheck"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "certifier-selfcheck",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/verification_lib/check_command.py",
+              "--",
+              "python3",
+              "-m",
+              "unittest",
+              "oracle.test_replay_qualification",
+              "-v"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "certification-research-controls",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "scripts/check_replay_certification.py",
+              "--replay",
+              "games/replays/th13_01.rpy",
+              "--dual-run"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "certify-th13-01-fullwindow",
+            "result_type": "FIDELITY_PASS",
+            "timeout": 3600,
+            "window": {
+              "end": 11674,
+              "roles": [
+                "reference",
+                "reference2"
+              ],
+              "start": 0
+            }
+          },
+          {
+            "argv": [
+              "python3",
+              "scripts/check_replay_certification.py",
+              "--replay",
+              "games/replays/th13_udSr01.rpy",
+              "--dual-run"
+            ],
+            "cwd": ".",
+            "external": false,
+            "id": "certify-udSr01-fullwindow",
+            "result_type": "FIDELITY_PASS",
+            "timeout": 3600,
+            "window": {
+              "end": 11063,
+              "roles": [
+                "reference",
+                "reference2"
+              ],
+              "start": 0
+            }
+          }
+        ]
+      },
+      "completion": "FIDELITY_PASS",
+      "depends": [
+        "replay-qualification-research"
+      ],
+      "evidence": [
+        "独立原版身份/输入协议证明、精确窗口捕获与生产端完成记录"
+      ],
+      "goal": "认证 v1.00c 原版场景、初值、seed、输入消费相位、双跑确定性及关卡里程碑。",
+      "id": "replay-qualification-certification",
+      "inputs": [
+        "games",
+        "scripts/check_replay_certification.py",
+        "oracle/test_replay_qualification.py"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不能将研究报告或双跑自一致当作参考资格",
+        "不放宽捕获窗口或忽略字段"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "oracle"
+      ],
+      "read": [
+        "AGENTS.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md",
+        "scripts/check_replay_certification.py",
+        "oracle/test_replay_qualification.py"
+      ],
+      "stop": "参考资格不足则修参考世界；缺认证器、精确窗口或输入身份时 BLOCKED。"
+    },
+    {
+      "allowed": [],
+      "blocked_reason": "完整语义与资源内容契约/核验器尚未配置。",
+      "checks": {
+        "fast": [],
+        "full": []
+      },
+      "completion": "FIDELITY_PASS",
+      "depends": [
+        "replay-qualification-certification"
+      ],
+      "evidence": [
+        "每类字段变异负控、完整连续帧及生产端完成记录；全部有效资源内容对照"
+      ],
+      "goal": "生产提交完整捕获 STD、全部有效几何/状态、纹理字体内容及版本、RT 依赖和提交边界。",
+      "id": "complete-capture",
+      "inputs": [
+        "eagler-touhou/ports/th13/web/cpp/game"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不使用捕获专用补画",
+        "稀疏事件不得伪装连续帧；需要生产端完成证明"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md"
+      ],
+      "stop": "缺顶点/纹理/状态则补捕获，不删除操作或比对字段。"
+    },
+    {
+      "allowed": [],
+      "blocked_reason": "生产驱动统一和实际浏览器门禁尚未实现。",
+      "checks": {
+        "fast": [],
+        "full": []
+      },
+      "completion": "FIDELITY_PASS",
+      "depends": [
+        "complete-capture"
+      ],
+      "evidence": [
+        "真实生产 tick 同路径证明、高刷新重复显示不模拟、实际浏览器门禁"
+      ],
+      "goal": "浏览器与无头验证复用真实 Application/SceneDisplay/FrameScheduler tick 和平台服务注入。",
+      "id": "production-driver",
+      "inputs": [
+        "eagler-touhou/ports/th13/web/cpp"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不新增平行游戏模拟真值",
+        "不认证缺独立参考的 framebuffer"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md"
+      ],
+      "stop": "生产驱动/浏览器适配器缺失则 BLOCKED，legacy harness 不替代生产认证。"
+    },
+    {
+      "allowed": [],
+      "blocked_reason": "Stage1 全链路严格认证、指定 CPA 执行及独立原版 GPU 输出门禁未配置。",
+      "checks": {
+        "fast": [],
+        "full": []
+      },
+      "completion": "FIDELITY_PASS",
+      "depends": [
+        "production-driver",
+        "backend-certification"
+      ],
+      "evidence": [
+        "指定 CPA 实际运行记录、逐模块原版机制证据、严格连续主线窗、独立原版与浏览器 framebuffer 数值认证"
+      ],
+      "goal": "由指定 CPA GLM 实际完成菜单→Stage1→关末→Stage2 主线；原版资格、完整捕获、全有效行为/渲染语义、真实浏览器最终输出均正确，才评价框架有效。",
+      "id": "stage1-full-chain",
+      "inputs": [
+        "eagler-touhou/ports/th13/web/cpp",
+        "games",
+        "eagler-touhou/ports/th13/docs/plans/stage1-acceptance.md"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "工具绿不等于 Stage1 绿",
+        "Stage1 主线不等于全游戏完成",
+        "无独立原版 GPU 真值不得声称最终输出一致"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "eagler-touhou/ports/th13/docs/plans/coverage-matrix.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md",
+        "eagler-touhou/ports/th13/docs/plans/stage1-acceptance.md"
+      ],
+      "stop": "最多三轮/具名模块；缺独立 GPU 环境、资格或覆盖均保持 BLOCKED，禁止框架好用的提前结论。"
+    },
+    {
+      "allowed": [],
+      "blocked_reason": "独立 GPU 真值与浏览器数值认证适配器未配置。",
+      "checks": {
+        "fast": [],
+        "full": []
+      },
+      "completion": "FIDELITY_PASS",
+      "depends": [
+        "production-driver"
+      ],
+      "evidence": [
+        "独立原版 GPU 真值、数值对照及真实浏览器展示 receipt"
+      ],
+      "goal": "独立原版 GPU fixtures、提交降低保持性与真实浏览器 framebuffer 自动数值认证。",
+      "id": "backend-certification",
+      "inputs": [
+        "eagler-touhou/ports/th13/portable/sdl",
+        "games"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不以同 renderer 自比或假设备清单相同冒充像素真值",
+        "不认证未测 GPU/输入配置"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "docs/plans/autonomous-refactor-2026-10-24.md"
+      ],
+      "stop": "缺独立环境则 BLOCKED，不能人眼通过或相似度阈值替代严格一致。"
+    },
+    {
+      "allowed": [],
+      "blocked_reason": "全游戏必需路径核验器和独立输出覆盖未配置。",
+      "checks": {
+        "fast": [],
+        "full": []
+      },
+      "completion": "FIDELITY_PASS",
+      "depends": [
+        "stage1-full-chain",
+        "backend-certification"
+      ],
+      "evidence": [
+        "版本化必需场景矩阵逐项执行与五道门的当前输入证据"
+      ],
+      "goal": "按资产与可达分支覆盖所有必需角色、机体、难度、关卡、菜单、对话、暂停与结算路径，完成声明范围内全游戏。",
+      "id": "full-game-coverage",
+      "inputs": [
+        "eagler-touhou/ports/th13",
+        "games"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不把首条主线或工具通过等同完整交付",
+        "不跳过缺失场景后整体全绿"
+      ],
+      "protected": [
+        "verification",
+        "scripts/verify.py",
+        "eagler-touhou/ports/th13/portable/sdl"
+      ],
+      "read": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/docs/plans/coverage-matrix.md"
+      ],
+      "stop": "任一必需路径未覆盖则 BLOCKED，有限配置不外推任意输入/GPU 全等。"
+    },
+    {
+      "allowed": [
+        "eagler-touhou/ports/th13/web/cpp/game/StageBattle.cpp",
+        "eagler-touhou/ports/th13/web/cpp/game/StageBattle.hpp",
+        "eagler-touhou/ports/th13/tests/ui/stage1_player_state_test.cpp"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/ui.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-player-ui",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/ui.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-player-ui-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "portable/build.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-player-web-build",
+            "result_type": "TOOL_PASS",
+            "timeout": 900,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [],
+      "evidence": [
+        "Independent reviewed maintenance receipts",
+        "容器内固定 focused 用例退出码收据；死亡扣步长与底限；有无 events_ 时玩家状态一致；灵界激活时 Bomb 不扣弹、不启定时器、不触发 HUD；普通 X 边沿仍消费 1 弹。",
+        "focused 用例名：death_power_deducts_step、death_power_clamps_at_step、death_power_same_with_and_without_events、bomb_rejected_while_trance_active_stock_unchanged、bomb_rejected_while_trance_active_no_hud_or_timer、bomb_normal_edge_still_consumes_one_stock"
+      ],
+      "goal": "在 StageBattle 生产路径落实已确证玩法修复：(1) 死亡按 00445a20 执行 power -= power_step，随后 clamp 到 >= power_step；(2) 灵界激活时按 0040a540 共享门拒绝 Bomb。events_/capture 仅观察，不得改变玩家状态或玩法分支。completion 保持 TOOL_PASS，不宣称 fidelity。",
+      "id": "stage1-player-state",
+      "inputs": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/tests/harness/test_framework.hpp",
+        "eagler-touhou/ports/th13/tests/ui.test.mjs",
+        "eagler-touhou/ports/th13/portable/build.mjs",
+        "artifacts/decomp/jp/functions/00442960.c",
+        "artifacts/decomp/jp/functions/00441dd0.c",
+        "artifacts/decomp/jp/functions/00445900.c",
+        "artifacts/decomp/jp/functions/00444ca0.c",
+        "eagler-touhou/ports/th13/tests/ui/stage1_player_state_test.cpp",
+        "eagler-touhou/ports/th13/tests/ui/run.sh",
+        "artifacts/decomp/jp/functions/00445a20.c",
+        "artifacts/decomp/jp/functions/00443240.c",
+        "artifacts/decomp/jp/functions/0040a540.c",
+        "artifacts/decomp/jp/functions/0040a3b0.c",
+        "artifacts/verification/p2-stagebattle-20261025T011905Z/StageBattle.diff",
+        "artifacts/verification/p8-bomb-core-20261025T014203Z/candidate.diff"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "capture/events_ 不得改变玩家状态、输入、掉落或玩法分支，也不得成为上述玩法修复的前置条件",
+        "不认证参考资格或像素 fidelity（本卡 completion 仅 TOOL_PASS）",
+        "不修改验证器、golden、容差、窗口或忽略字段",
+        "不新增平行游戏状态、捕获专用补画或通用防御框架",
+        "不新建 baseline 或吸收非本卡 allowed 差量"
+      ],
+      "protected": [
+        "AGENTS.md",
+        "HANDOFF.md",
+        "eagler-touhou/AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "games",
+        "verification/policy.json",
+        "verification",
+        "scripts/verify.py",
+        "scripts/test_verify.py",
+        "scripts/task_configure.py",
+        "scripts/verify_delivery.py"
+      ],
+      "read": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "eagler-touhou/ports/th13/docs/plans/stage1-acceptance.md",
+        "eagler-touhou/ports/th13/docs/plans/replay-twin-divergence.md",
+        "artifacts/decomp/jp/functions/00442960.c",
+        "artifacts/decomp/jp/functions/00441dd0.c",
+        "artifacts/decomp/jp/functions/00445900.c",
+        "artifacts/decomp/jp/functions/00444ca0.c",
+        "eagler-touhou/ports/th13/tests/ui.test.mjs",
+        "eagler-touhou/ports/th13/portable/build.mjs",
+        "eagler-touhou/ports/th13/tests/ui/stage1_player_state_test.cpp",
+        "eagler-touhou/ports/th13/tests/ui/run.sh",
+        "eagler-touhou/ports/th13/tests/harness/test_framework.hpp",
+        "artifacts/decomp/jp/functions/00445a20.c",
+        "artifacts/decomp/jp/functions/00443240.c",
+        "artifacts/decomp/jp/functions/0040a540.c",
+        "artifacts/decomp/jp/functions/0040a3b0.c",
+        "artifacts/verification/p2-stagebattle-20261025T011905Z/StageBattle.diff",
+        "artifacts/verification/p8-bomb-core-20261025T014203Z/candidate.diff"
+      ],
+      "stop": "At most three rounds; independent mechanism review before a new hypothesis"
+    },
+    {
+      "allowed": [
+        "eagler-touhou/ports/th13/web/cpp/game/ReplayFile.cpp",
+        "eagler-touhou/ports/th13/web/cpp/game/ReplayFile.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/RunScene.cpp",
+        "eagler-touhou/ports/th13/web/cpp/game/RunScene.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/SessionState.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/StageSim.cpp",
+        "eagler-touhou/ports/th13/web/cpp/game/StageSim.hpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/Application.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/Application.hpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/ApplicationState.hpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/BrowserRuntime.cpp"
+      ],
+      "blocked_reason": "",
+      "checks": {
+        "fast": [
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/replay.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-replay-decode-input",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/ui.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-replay-runtime-ui",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          }
+        ],
+        "full": [
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/replay.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-replay-decode-input-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "--test",
+              "tests/ui.test.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-replay-runtime-ui-full",
+            "result_type": "TOOL_PASS",
+            "timeout": 300,
+            "window": null
+          },
+          {
+            "argv": [
+              "python3",
+              "/work/scripts/verification_lib/check_command.py",
+              "--",
+              "node",
+              "portable/build.mjs"
+            ],
+            "cwd": "eagler-touhou/ports/th13",
+            "external": false,
+            "id": "stage1-replay-web-build",
+            "result_type": "TOOL_PASS",
+            "timeout": 900,
+            "window": null
+          }
+        ]
+      },
+      "completion": "TOOL_PASS",
+      "depends": [],
+      "evidence": [
+        "Independent reviewed maintenance receipts",
+        "容器内现有 tests/replay.test.mjs 解码套件、tests/ui.test.mjs 套件与 portable/build.mjs 构建的实际退出码；这些仅证明局部 TOOL_PASS，不证明完整输入消费相位或原版初值。",
+        "00449070 的 stage 头 0x14..0x6b 与 seed/计数恢复、00448e40→00448200/00414f30 单一输入流接线的代码路径与未决项；不冒充 FIDELITY_PASS。"
+      ],
+      "goal": "明确两项验收：Replay 装载后从 00449070 恢复 stage 头 0x14..0x6b 到会话/玩家字段并恢复 seed/计数（不得留默认值）；BrowserRuntime 采样唯一 GameInput controls，按 00448200/00414f30 相位每游戏帧 update 一次，并把该同一实例的 held/pressed/released/repeated 传给 Application → RunScene → StageBattle，禁止 P3 第二 GameInput 实例。仅 TOOL_PASS。",
+      "id": "stage1-replay-runtime",
+      "inputs": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/tests/harness/test_framework.hpp",
+        "eagler-touhou/ports/th13/tests/replay.test.mjs",
+        "eagler-touhou/ports/th13/tests/ui.test.mjs",
+        "eagler-touhou/ports/th13/portable/build.mjs",
+        "eagler-touhou/ports/th13/portable/build-harness.mjs",
+        "artifacts/decomp/jp/functions/00449070.c",
+        "artifacts/decomp/jp/functions/00448200.c",
+        "artifacts/decomp/jp/functions/00414f30.c",
+        "artifacts/decomp/jp/functions/00445c40.c",
+        "artifacts/decomp/jp/functions/00446000.c",
+        "eagler-touhou/ports/th13/web/cpp/game/GameInput.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/GameInput.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/ApplicationState.hpp",
+        "artifacts/decomp/jp/functions/00448e40.c"
+      ],
+      "max_rounds": 3,
+      "non_goals": [
+        "不以 TOOL_PASS 宣称完整初值/seed/输入相位已获原版认证；本卡仍须真实实现恢复与单一传递，不能留 TODO/默认值。",
+        "不修改 golden、baseline、容差、窗口、忽略字段或验证器",
+        "不新增/重建捕获专用游戏状态，不用 legacy DrawCapture/harness 认证网页",
+        "不扩展到 Stage2、全游戏覆盖或独立 GPU 输出认证",
+        "不以本卡新建 baseline 吸收 M0 或既有 owner 差量"
+      ],
+      "protected": [
+        "AGENTS.md",
+        "HANDOFF.md",
+        "eagler-touhou/AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "games",
+        "verification/policy.json",
+        "verification",
+        "scripts/verify.py",
+        "scripts/test_verify.py",
+        "scripts/task_configure.py",
+        "scripts/verify_delivery.py"
+      ],
+      "read": [
+        "AGENTS.md",
+        "eagler-touhou/ports/th13/AGENTS.md",
+        "eagler-touhou/ports/th13/docs/plans/stage1-acceptance.md",
+        "eagler-touhou/ports/th13/docs/plans/replay.md",
+        "artifacts/decomp/jp/functions/00449070.c",
+        "artifacts/decomp/jp/functions/00448200.c",
+        "artifacts/decomp/jp/functions/00414f30.c",
+        "artifacts/decomp/jp/functions/00445c40.c",
+        "artifacts/decomp/jp/functions/00446000.c",
+        "eagler-touhou/ports/th13/tests/replay.test.mjs",
+        "eagler-touhou/ports/th13/tests/ui.test.mjs",
+        "eagler-touhou/ports/th13/portable/build.mjs",
+        "eagler-touhou/ports/th13/web/cpp/game/GameInput.hpp",
+        "eagler-touhou/ports/th13/web/cpp/game/GameInput.cpp",
+        "eagler-touhou/ports/th13/web/cpp/sdl/ApplicationState.hpp",
+        "artifacts/decomp/jp/functions/00448e40.c"
+      ],
+      "stop": "At most three rounds; independent mechanism review before a new hypothesis"
+    }
+  ]
+}

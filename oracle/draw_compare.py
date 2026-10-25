@@ -1,41 +1,23 @@
-"""绘制清单比对：移植侧 vs 原版侧 逐帧逐字段（draw-contract.md）。
-
-用法（容器内 /work）：
-    python3 -m oracle.draw_compare <port.jsonl> <oracle.jsonl> [--ulp N]
-    python3 -m oracle.draw_compare <port.jsonl> <oracle.jsonl> --ignore <field>
-
-范式对齐 stage1_compare.py：末行
-    RESULT first_divergence_frame=<n|none> window=<帧数> ops=<数> [ignored=<字段,...>]
-为唯一裁决。浮点字段按 ULP 容差（默认 4），其余字段精确比对。
-
---ignore 纪律（整改 2026-10-23，draw-contract.md §6）：
-  * --ignore 是**诊断模式**开关，仅限隔离工作面用（定位「除 X 外是否还有
-    其他分歧」）；绿灯/门禁链路**禁止**带 --ignore 出 RESULT。
-  * 带 --ignore 的输出：RESULT 行尾强制追加 ignored=<字段> 且 exit code=3
-    （与无过滤 0/1 区分），避免被误当全绿。
-  * 每个 --ignore 的字段必须在 HANDOFF/工作面登记销账条件与期限。
+"""Streaming draw comparator. Exit 0=strict qualified match, 1=divergence,
+2=invalid input, 3=diagnostic match (no expected window, ULP or filtering).
+RESULT_JSON v1 precedes the legacy RESULT line; no capture completion is inferred.
 """
+import argparse
+import itertools
 import json
 import math
+import os
 import re
 import struct
 import sys
 
-# 契约 §2/§3：这些路径下的元素为 %.9g 浮点串（按 ULP 容差比）；
-# verts[i][4]=argb 为 u32 整数（精确比）。
 FLOAT_ROOTS = {"viewport", "world", "texmat", "view", "proj"}
 _VERT_SLOT = re.compile(r"verts\[\d+\]\[(\d+)\]$")
 
 
 def is_float_path(path):
-    # 路径任一段命中浮点根（如 "op[3].world[8]" 的 "world"）
-    segs = re.split(r"[\[.\]]+", path)
-    if any(seg in FLOAT_ROOTS for seg in segs):
-        return True
     m = _VERT_SLOT.search(path)
-    if m:
-        return int(m.group(1)) != 4
-    return False
+    return any(s in FLOAT_ROOTS for s in re.split(r"[\[.\]]+", path)) or bool(m and int(m[1]) != 4)
 
 
 def f32_bits(x):
@@ -43,138 +25,153 @@ def f32_bits(x):
 
 
 def ulp_diff(a, b):
-    """两个 float 的 ULP 差（NaN==NaN 视为相等）。"""
-    if math.isnan(a) and math.isnan(b):
-        return 0
     if math.isnan(a) or math.isnan(b):
-        return 1 << 30
-    ia, ib = f32_bits(a), f32_bits(b)
-    if ia < 0:
-        ia = 0x80000000 - ia   # 有符号序
-    if ib < 0:
-        ib = 0x80000000 - ib
-    return abs(ia - ib)
+        return 0 if math.isnan(a) and math.isnan(b) else math.inf
+    if a == b:
+        return 0
+    if math.isinf(a) or math.isinf(b):
+        return math.inf
+    def ordered(x):
+        bits = f32_bits(x)
+        return 0x80000000 - (bits & 0x7fffffff) if bits & 0x80000000 else 0x80000000 + bits
+    return abs(ordered(a) - ordered(b))
 
 
-def cmp_float(a, b, ulp):
-    try:
-        fa, fb = float(a), float(b)
-    except (TypeError, ValueError):
-        return a == b
+def cmp_float(a, b, ulp, nan_equal=True):
+    fa, fb = float(a), float(b)
     if math.isnan(fa) or math.isnan(fb):
-        return (math.isnan(fa) and math.isnan(fb)) or a == b
-    return ulp_diff(fa, fb) <= ulp
+        return nan_equal and math.isnan(fa) and math.isnan(fb)
+    return fa == fb if ulp == 0 else ulp_diff(fa, fb) <= ulp
 
 
-def cmp_value(path, a, b, ulp):
-    """返回 None（相等）或分歧描述。"""
-    if isinstance(a, str) and isinstance(b, str) and is_float_path(path):
-        return None if cmp_float(a, b, ulp) else "%s: %r != %r" % (path, a, b)
-    if isinstance(a, float) or isinstance(b, float):
-        return None if cmp_float(a, b, ulp) else "%s: %r != %r" % (path, a, b)
+def cmp_value(path, a, b, ulp, nan_equal=True):
+    if is_float_path(path) and not isinstance(a, (list, dict)) and not isinstance(b, (list, dict)):
+        try:
+            equal = cmp_float(a, b, ulp, nan_equal)
+        except (ValueError, TypeError, OverflowError):
+            equal = False
+        return None if equal else f"{path}: {a!r} != {b!r}"
+    if isinstance(a, float) and isinstance(b, float):
+        return None if cmp_float(a, b, ulp, nan_equal) else f"{path}: {a!r} != {b!r}"
     if isinstance(a, list) and isinstance(b, list):
         if len(a) != len(b):
-            return "%s: len %d != %d" % (path, len(a), len(b))
+            return f"{path}: len {len(a)} != {len(b)}"
         for i, (x, y) in enumerate(zip(a, b)):
-            r = cmp_value("%s[%d]" % (path, i), x, y, ulp)
+            r = cmp_value(f"{path}[{i}]", x, y, ulp, nan_equal)
             if r:
                 return r
         return None
     if isinstance(a, dict) and isinstance(b, dict):
-        ka, kb = list(a.keys()), list(b.keys())
-        if ka != kb:
-            return "%s: keys %s != %s" % (path, ka, kb)
-        for k in ka:
-            r = cmp_value("%s.%s" % (path, k), a[k], b[k], ulp)
+        if list(a) != list(b):
+            return f"{path}: key order/set differs"
+        for k in a:
+            r = cmp_value(f"{path}.{k}", a[k], b[k], ulp, nan_equal)
             if r:
                 return r
         return None
-    return None if a == b else "%s: %r != %r" % (path, a, b)
+    return None if type(a) is type(b) and a == b else f"{path}: {a!r} != {b!r}"
 
 
-def load(path):
-    frames = {}
-    ops = 0
+def unique_object(pairs):
+    result = {}
+    for k, v in pairs:
+        if k in result:
+            raise ValueError(f"duplicate JSON key: {k}")
+        result[k] = v
+    return result
+
+
+def records(path, draws=True):
+    previous = (-1, -1)
+    count = 0
     with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            frames[obj["frame"]] = obj
-            ops += len(obj.get("ops", []))
-    return frames, ops
+        for line_number, line in enumerate(fh, 1):
+            if not line.strip():
+                raise ValueError(f"{path}:{line_number}: blank record")
+            obj = json.loads(line, object_pairs_hook=unique_object)
+            if not isinstance(obj, dict) or type(obj.get("frame")) is not int or obj["frame"] < 0:
+                raise ValueError(f"{path}:{line_number}: invalid frame")
+            if draws:
+                if obj["frame"] != count:
+                    raise ValueError(f"{path}:{line_number}: duplicate/missing/out-of-order frame, expected {count}")
+                if not isinstance(obj.get("ops"), list) or not all(isinstance(op, dict) for op in obj["ops"]):
+                    raise ValueError(f"{path}:{line_number}: invalid ops")
+                if not isinstance(obj.get("viewport"), list):
+                    raise ValueError(f"{path}:{line_number}: missing viewport")
+            else:
+                if type(obj.get("seq")) is not int or obj["seq"] < 0:
+                    raise ValueError(f"{path}:{line_number}: invalid seq")
+                cur = (obj["frame"], obj["seq"])
+                if cur <= previous:
+                    raise ValueError(f"{path}:{line_number}: duplicate/out-of-order event")
+                previous = cur
+            count += 1
+            yield obj
+    if count == 0:
+        raise ValueError(f"{path}: empty input")
+
+
+def parser(description):
+    p = argparse.ArgumentParser(description=description, allow_abbrev=False)
+    p.add_argument("port")
+    p.add_argument("oracle")
+    p.add_argument("--expected-frames", type=int)
+    p.add_argument("--ulp", type=int, default=0, help="diagnostic binary32 ULP tolerance")
+    return p
+
+
+def emit(first, window, count, code, kind, ignored=(), error=None, expected=None, ulp=0):
+    result = dict(schema="th13/compare/v1", kind=kind, first_divergence_frame=first,
+                  window=window, expected_frames=expected, **{kind: count}, exit_code=code,
+                  qualified=code == 0, ignored=sorted(ignored), ulp=ulp,
+                  capture_completion="not-attested", error=error)
+    print("RESULT_JSON " + json.dumps(result, allow_nan=False, sort_keys=True))
+    suffix = " ignored=" + ",".join(sorted(ignored)) if ignored else ""
+    print(f"RESULT first_divergence_frame={first if first is not None else 'none'} window={window if window is not None else 'unknown'} {kind}={count}{suffix}")
+    return code
 
 
 def main(argv):
-    args = []
-    ulp = 4
-    ignore = set()
-    i = 1
-    while i < len(argv):
-        if argv[i] == "--ulp":
-            i += 1
-            ulp = int(argv[i])
-        elif argv[i] == "--ignore":
-            i += 1
-            ignore.add(argv[i])  # 诊断模式：跳过字段（纪律见模块 docstring）
-        else:
-            args.append(argv[i])
-        i += 1
-    if len(args) != 2:
-        sys.stderr.write("usage: draw_compare <port.jsonl> <oracle.jsonl> "
-                         "[--ulp N] [--ignore field]\n")
-        return 2
-    port_frames, port_ops = load(args[0])
-    oracle_frames, oracle_ops = load(args[1])
-    window = max(max(port_frames), max(oracle_frames)) + 1
-    total_ops = max(port_ops, oracle_ops)
-
-    first_div = None
-    for frame in range(window):
-        pf = port_frames.get(frame)
-        of = oracle_frames.get(frame)
-        if pf is None and of is None:
-            continue
-        if pf is None or of is None:
-            first_div = (frame, "frame-missing: %s side" %
-                         ("port" if pf is None else "oracle"))
-            break
-        po = pf.get("ops", [])
-        oo = of.get("ops", [])
-        r = cmp_value("viewport", pf.get("viewport"), of.get("viewport"), ulp)
-        if r:
-            first_div = (frame, r)
-            break
-        if len(po) != len(oo):
-            first_div = (frame, "ops len %d != %d" % (len(po), len(oo)))
-            break
-        for k, (a, b) in enumerate(zip(po, oo)):
-            if ignore:
-                a = {key: value for key, value in a.items() if key not in ignore}
-                b = {key: value for key, value in b.items() if key not in ignore}
-            r = cmp_value("op[%d]" % k, a, b, ulp)
+    p = parser(__doc__)
+    p.add_argument("--ignore", action="append", default=[])
+    a = p.parse_args(argv[1:])
+    first = None
+    count = 0
+    window = 0
+    try:
+        if a.ulp < 0 or (a.expected_frames is not None and a.expected_frames <= 0):
+            raise ValueError("ULP must be nonnegative; expected frames must be positive")
+        if os.path.samefile(a.port, a.oracle):
+            raise ValueError("input aliases: port and oracle must be distinct files")
+        totals = [0, 0]
+        lengths = [0, 0]
+        for pf, of in itertools.zip_longest(records(a.port), records(a.oracle)):
+            frame = window
+            window += 1
+            for i, obj in enumerate((pf, of)):
+                if obj is not None:
+                    lengths[i] += 1
+                    totals[i] += len(obj["ops"])
+            if first is not None:
+                continue
+            r = None
+            if pf is None or of is None:
+                r = "frame missing on one side"
+            else:
+                def filtered(obj):
+                    return {**obj, "ops": [{k: v for k, v in op.items() if k not in a.ignore} for op in obj["ops"]]}
+                r = cmp_value("frame", filtered(pf), filtered(of), a.ulp)
             if r:
-                first_div = (frame, r)
-                break
-        if first_div:
-            break
-
-    if first_div:
-        print("first divergence at frame %d: %s" % first_div)
-        print("RESULT first_divergence_frame=%d window=%d ops=%d%s"
-              % (first_div[0], window, total_ops, ignored_suffix(ignore)))
-        return 1
-    print("RESULT first_divergence_frame=none window=%d ops=%d%s"
-          % (window, total_ops, ignored_suffix(ignore)))
-    # 诊断模式（带 --ignore）永远不算绿灯：exit 3 与无过滤的 0 区分，
-    # 门禁脚本按 code 判定，杜绝「过滤后全绿」被当真绿（整改纪律）。
-    return 3 if ignore else 0
-
-
-def ignored_suffix(ignore):
-    # RESULT 行尾的显式登记：被过滤字段全名列出（整改 2026-10-23）。
-    return " ignored=%s" % ",".join(sorted(ignore)) if ignore else ""
+                first = frame
+                print(f"first divergence at frame {frame}: {r}")
+        count = max(totals)
+        if a.expected_frames is not None and lengths != [a.expected_frames] * 2:
+            raise ValueError(f"expected {a.expected_frames} frames on both sides, got {lengths}")
+        code = 1 if first is not None else 3 if a.ignore or a.ulp or a.expected_frames is None else 0
+        return emit(first, window, count, code, "ops", a.ignore, expected=a.expected_frames, ulp=a.ulp)
+    except (OSError, ValueError, TypeError, OverflowError) as exc:
+        print(str(exc), file=sys.stderr)
+        return emit(first, window, count, 2, "ops", a.ignore, str(exc), a.expected_frames, a.ulp)
 
 
 if __name__ == "__main__":

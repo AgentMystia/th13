@@ -1,0 +1,15 @@
+{
+  "schema": "th13/coverage/v1",
+  "required": [
+    "loading", "title", "difficulty", "character", "stage1", "boss1", "dialogue", "pause-resume", "stage-transition", "stage2-entry",
+    "stage2", "boss2", "stage3", "boss3", "stage4", "boss4", "stage5", "boss5", "stage6", "boss6", "extra", "extra-boss",
+    "reimu-a", "marisa-a", "sanae-a", "youmu-a",
+    "easy", "normal", "hard", "lunatic", "extra-difficulty",
+    "trance-enter-exit", "death-respawn", "bomb", "item-score-resource-evolution",
+    "menu-replay", "replay-playback", "replay-stage-select", "replay-save", "replay-eof",
+    "game-over", "continue", "ending", "staff-roll", "score-entry", "player-data", "music-room", "options", "manual",
+    "stage-practice", "spell-practice", "return-title", "restart-stage", "quit"
+  ],
+  "rule": "Each named case requires qualified independent original and production-browser state/draw/framebuffer evidence. This minimum is not exhaustive branch proof; reachable asset/program branches discovered later are additive, never silently skipped.",
+  "qualification": "Not yet executed; no delivery claim"
+}

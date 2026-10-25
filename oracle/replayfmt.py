@@ -122,7 +122,7 @@ def zun_inflate(src, limit):
 
 class ReplayStage:
     __slots__ = ("number", "stamp", "frame_count", "blob_size", "score",
-                 "input", "events")
+                 "input", "events", "header")
 
     def __init__(self):
         self.number = 0
@@ -132,6 +132,8 @@ class ReplayStage:
         self.score = 0
         self.input = b""
         self.events = b""
+        self.header = b""    # 完整 0xc4 stage 头原样字节（0x449070 复制 +0x14
+                              # 起的 0x58 字节至 0x4be7b8，头内偏移=字段位置）
 
     def frame(self, index):
         """6 字节 = 态/按下/释放 三 u16（0x4480a0:41-43）。"""
@@ -159,6 +161,10 @@ class ReplayFile:
         self.slow_rate = 0.0
         self.practice_stage = 0
         self.stage_count = 0
+        self.top_header = b""    # 解压流 [0,0x74) 顶层头原样字节（0x448c40:67
+                                  # 单独 malloc 的块；0x447900 case 1 装备序
+                                  # 从其 +0x5c/0x60/0x64 读出写全局——真实
+                                  # 初值唯一源，禁止字段级伪造）
         self.stages = []
         self.user_blocks = []
 
@@ -183,6 +189,7 @@ class ReplayFile:
         body = xor_decrypt(body, 0x7D, 0x3A, 0x100)
         plain = zun_inflate(body, self.uncomp_size)
 
+        self.top_header = bytes(plain[:TOP_SIZE])
         self.player_name = plain[:12].split(b"\0")[0].decode("ascii", "replace").rstrip()
         (self.score,) = struct.unpack_from("<i", plain, 0x14)
         (self.slow_rate,) = struct.unpack_from("<f", plain, 0x54)
@@ -195,6 +202,7 @@ class ReplayFile:
             if pos + STAGE_HEADER_SIZE > len(plain):
                 raise ReplayFormatError("stage header out of range")
             stage = ReplayStage()
+            stage.header = bytes(plain[pos:pos + STAGE_HEADER_SIZE])
             stage.number, stage.stamp = struct.unpack_from("<HH", plain, pos)
             (stage.frame_count,) = struct.unpack_from("<I", plain, pos + 4)
             (stage.blob_size,) = struct.unpack_from("<I", plain, pos + 8)

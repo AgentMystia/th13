@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "environment": {
+    "root": "/work",
+    "home": "/home/dev",
+    "container_marker": "/run/.containerenv",
+    "required_paths": ["/opt/wasi-sdk", "/opt/emsdk"]
+  },
+  "result_types": ["TOOL_PASS", "BASELINE_HELD", "FIDELITY_PASS", "BLOCKED", "FAIL"],
+  "protected": ["AGENTS.md", "HANDOFF.md", "eagler-touhou/AGENTS.md", "eagler-touhou/ports/th13/AGENTS.md", "games", "verification/policy.json"]
+}

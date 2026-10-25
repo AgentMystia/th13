@@ -29,3 +29,8 @@ __pycache__/
 # 容器内工具 XDG 落脏兜底（正常应写入容器 HOME，不进工作区）
 .config/
 .local/
+
+# r5 起：轮次产物归档与本地会话目录不入库（大体积 JSONL/临时件）
+r4/
+tmp/
+.zcode/

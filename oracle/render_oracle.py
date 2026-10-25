@@ -800,47 +800,16 @@ class RenderOracle:
         return out
 
     def game_malloc(self, size):
-        # M1.3b：回收堆（原纯 bump 在长窗下每帧 ~140KB 分配不可持续——
-        # f1219 已越 128MB 堆端派发未映射地址）。first-fit 空闲块优先，
-        # 无适配再 bump；尺寸登记供 HeapReAlloc/HeapSize/game_free。
-        size = max(size, 1)
-        sizes = getattr(self, "_alloc_sizes", None)
-        if sizes is None:
-            sizes = self._alloc_sizes = {}
-        if not hasattr(self, "_free_list"):
-            self._free_list = []
-        for i, (addr, sz) in enumerate(self._free_list):
-            if sz >= size:
-                if sz >= size + 32:
-                    self._free_list[i] = (addr + size, sz - size)
-                else:
-                    self._free_list.pop(i)
-                    size = sz
-                sizes[addr] = size
-                self.stats["mallocs"] += 1
-                self.stats["malloc_bytes"] += size
-                return addr
         ptr = self.bump
-        self.bump = (self.bump + size + 15) & ~15
-        sizes[ptr] = size
+        end = (ptr + max(size, 1) + 15) & ~15
+        from .machine import HEAP_BASE, HEAP_SIZE
+        if size < 0 or end > HEAP_BASE + HEAP_SIZE:
+            self.fail("oracle heap exhausted: size=%d bump=%08x end=%08x"
+                      % (size, ptr, HEAP_BASE + HEAP_SIZE))
+        self.bump = end
         self.stats["mallocs"] += 1
-        self.stats["malloc_bytes"] += size
+        self.stats["malloc_bytes"] += max(size, 1)
         return ptr
-
-    def game_free(self, ptr):
-        sizes = getattr(self, "_alloc_sizes", None) or {}
-        sz = sizes.pop(ptr, 0)
-        if not sz or not hasattr(self, "_free_list"):
-            return
-        self._free_list.append((ptr, sz))
-        self._free_list.sort()
-        merged = []
-        for a, s in self._free_list:
-            if merged and merged[-1][0] + merged[-1][1] == a:
-                merged[-1] = (merged[-1][0], merged[-1][1] + s)
-            else:
-                merged.append([a, s])
-        self._free_list[:] = [(a, s) for a, s in merged]
 
     def fail(self, message):
         sys.stderr.write("render-oracle FAIL frame=%d: %s\n"
@@ -893,135 +862,30 @@ class RenderOracle:
         def heap_alloc(machine):
             esp = machine.uc.reg_read(UC_X86_REG_ESP)
             size = self.rd32(esp + 0xC)
-            if size > 0x100000:
-                sys.stderr.write("BIGALLOC bf=%d HeapAlloc size=0x%x "
-                                 "caller=%08x\n"
-                                 % (self.frame - (self.battle_first or 0)
-                                    if hasattr(self, "battle_first") else -1,
-                                    size, self.rd32(esp)))
             return self.game_malloc(size)
         m.stub("HeapAlloc", heap_alloc, args_pop=12)
-        # 分配族补全（M1.3b GameOver 结算渲染 f1213 崩根因：HeapReAlloc 走默认
-        # 桩返 0=失败 → CRT realloc → new 拿 NULL → 0x43e2cb [0+0xc]）。
-        # 真机语义=成功；realloc=新块+按登记尺寸拷贝（尺寸表由 game_malloc
-        # 惰性建立）。
-        def _game_malloc_sized(size):
-            ptr = self.game_malloc(size)
-            self._alloc_sizes[ptr] = size
-            return ptr
-
-        def heap_realloc(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            mem = self.rd32(esp + 0x10)
-            size = self.rd32(esp + 0x14)
-            new = _game_malloc_sized(size)
-            old = self._alloc_sizes.get(mem, 0)
-            if mem and old:
-                self.uc.mem_write(new, bytes(
-                    self.uc.mem_read(mem, min(old, size))))
-            return new
-        m.stub("HeapReAlloc", heap_realloc, args_pop=16)
-
-        def heap_size(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            mem = self.rd32(esp + 0x10)
-            return self._alloc_sizes.get(mem, 0x1000)
-        m.stub("HeapSize", heap_size, args_pop=12)
-
-        def virtual_alloc(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            # VirtualAlloc(addr, size, type, protect)：size=[esp+8]、
-            # type=[esp+0xC]（MEM_COMMIT=0x1000）。
-            size = self.rd32(esp + 0x8)
-            alloc_type = self.rd32(esp + 0xC)
-            if size > 0x100000:
-                sys.stderr.write("BIGALLOC bf=%d VirtualAlloc size=0x%x "
-                                 "type=%x caller=%08x\n"
-                                 % (self.frame - (self.battle_first or 0)
-                                    if hasattr(self, "battle_first") else -1,
-                                    size, alloc_type, self.rd32(esp)))
-            ptr = _game_malloc_sized(size)
-            if (alloc_type & 0x1000) and size <= 0x100000:
-                self.uc.mem_write(ptr, b"\x00" * size)
-            return ptr
-        m.stub("VirtualAlloc", virtual_alloc, args_pop=16)
-
-        def local_alloc(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            size = self.rd32(esp + 0x8)
-            return _game_malloc_sized(size)
-        m.stub("LocalAlloc", local_alloc, args_pop=8)
-        m.stub("GlobalAlloc", local_alloc, args_pop=8)
-        def heap_free(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            self.game_free(self.rd32(esp + 0xC))
-            return 1
-        m.stub("HeapFree", heap_free, args_pop=12)
-
-        # M1.3b scoreth13.dat 自举：写档捕获（CreateFileA 写模式→魔数句柄
-        # 0x5C0BE5；WriteFile 落 python 缓冲；CloseHandle 落盘 raw 目录）。
-        # 配合 TH13_GEN_SCOREDAT 驱动游戏自己的存档器 0x449e50 产出真格式
-        # 文件（哑文件先喂给装载路径使 table[0] 非空——存档器 NULL 检查过）。
-        self._scoredat_buf = bytearray()
-
-        def create_file_a(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            name_ptr = self.rd32(esp + 4)
-            access = self.rd32(esp + 8)
-            try:
-                name = self.m.read_cstr(name_ptr, 260)
-            except Exception:
-                name = ""
-            if "scoreth13" in name and (access & 0x40000000):
-                self._scoredat_buf = bytearray()
-                return 0x5C0BE5
-            return 0xFFFFFFFE if "scoreth13" not in name else 0
-        m.stub("CreateFileA", create_file_a, args_pop=28)
-
-        def write_file(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            handle = self.rd32(esp + 4)
-            buf = self.rd32(esp + 8)
-            count = self.rd32(esp + 0xC)
-            written_ptr = self.rd32(esp + 0x10)
-            if handle == 0x5C0BE5:
-                self._scoredat_buf += bytes(
-                    machine.uc.mem_read(buf, count))
-                self.wr32(written_ptr, count)
-                return 1
-            return 0
-        m.stub("WriteFile", write_file, args_pop=20)
-
-        def close_handle(machine):
-            esp = machine.uc.reg_read(UC_X86_REG_ESP)
-            if self.rd32(esp + 4) == 0x5C0BE5 and self._scoredat_buf:
-                out = "artifacts/reference/raw/scoreth13.dat"
-                with open(out, "wb") as fh:
-                    fh.write(bytes(self._scoredat_buf))
-                sys.stderr.write("SCOREDAT-SAVED %s (%d bytes)\n"
-                                 % (out, len(self._scoredat_buf)))
-            return 1
-        m.stub("CloseHandle", close_handle, args_pop=4)
-        m.stub("VirtualFree", lambda machine: 1, args_pop=12)
-        m.stub("LocalFree", lambda machine: 1, args_pop=4)
-        m.stub("GlobalFree", lambda machine: 1, args_pop=4)
+        m.stub("HeapFree", lambda machine: 1, args_pop=12)
         m.stub("InitializeCriticalSectionAndSpinCount",
                lambda machine: 1, args_pop=8)
         m.stub("InitializeCriticalSection", lambda machine: 1, args_pop=4)
         m.stub("Sleep", lambda machine: 0, args_pop=4)
         m.stub("timeBeginPeriod", lambda machine: 0, args_pop=4)
         m.stub("timeEndPeriod", lambda machine: 0, args_pop=4)
+        m.stub("GetSystemTimeAsFileTime", self._system_filetime, args_pop=4)
+
+    def _system_filetime(self, machine):
+        # 固定UTC 2020-01-01；真实_time64/localtime64链仍执行。
+        esp = machine.uc.reg_read(UC_X86_REG_ESP)
+        output = self.rd32(esp + 4)
+        machine.uc.mem_write(output, struct.pack("<Q", 132223104000000000))
+        return 0
 
     def init_ptd(self):
         self.ptd = self.game_malloc(0x214)
         self.uc.mem_write(self.ptd, b"\x00" * 0x214)
         self.m.call(0x0047FD2D, args=[self.ptd, 0], timeout_ms=10_000)
         self.m.override_call(GETPTD, lambda machine: self.ptd)
-        # _getptd 兄弟访问器 0x47fde1（C++ 运行时 per-thread 子堆链
-        # 0x483652→0x47fb09→0x47aee5 用，读 ptd+0x44 的 phd 描述符）：
-        # 未覆写时走真 TLS 返 NULL → 0x483652 返 0 → 上游 0x47b16d
-        # （ cdecl 指针参函数，**非分配器**——曾被误 override 成
-        # game_malloc 造成 55MB/帧假爆堆）恒返 0。同返假 ptd。
+        # _getptd_noexit 与 _getptd 必须返回同一个线程局部状态。
         self.m.override_call(0x0047FDE1, lambda machine: self.ptd)
 
     def patch_globals(self):
