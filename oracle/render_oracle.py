@@ -800,16 +800,49 @@ class RenderOracle:
         return out
 
     def game_malloc(self, size):
-        ptr = self.bump
-        end = (ptr + max(size, 1) + 15) & ~15
         from .machine import HEAP_BASE, HEAP_SIZE
-        if size < 0 or end > HEAP_BASE + HEAP_SIZE:
+        if size < 0:
             self.fail("oracle heap exhausted: size=%d bump=%08x end=%08x"
-                      % (size, ptr, HEAP_BASE + HEAP_SIZE))
-        self.bump = end
+                      % (size, self.bump, HEAP_BASE + HEAP_SIZE))
+        # Model the ownership contract of HeapAlloc/HeapFree, without claiming
+        # to reproduce a particular Windows heap's address selection policy.
+        if not hasattr(self, "_heap_live"):
+            self._heap_live = {}
+            self._heap_free = []
+        span = (max(size, 1) + 15) & ~15
+        for i, (ptr, available) in enumerate(self._heap_free):
+            if available >= span:
+                del self._heap_free[i]
+                if available > span:
+                    self._heap_free.insert(i, (ptr + span, available - span))
+                break
+        else:
+            ptr = self.bump
+            end = ptr + span
+            if end > HEAP_BASE + HEAP_SIZE:
+                self.fail("oracle heap exhausted: size=%d bump=%08x end=%08x"
+                          % (size, ptr, HEAP_BASE + HEAP_SIZE))
+            self.bump = end
+        self._heap_live[ptr] = span
         self.stats["mallocs"] += 1
         self.stats["malloc_bytes"] += max(size, 1)
         return ptr
+
+    def game_free(self, ptr):
+        if not ptr:
+            return
+        span = getattr(self, "_heap_live", {}).pop(ptr, None)
+        if span is None:
+            self.fail("oracle heap free of unknown or released pointer: %08x" % ptr)
+        self._heap_free.append((ptr, span))
+        self._heap_free.sort()
+        merged = []
+        for addr, size in self._heap_free:
+            if merged and merged[-1][0] + merged[-1][1] == addr:
+                merged[-1] = (merged[-1][0], merged[-1][1] + size)
+            else:
+                merged.append((addr, size))
+        self._heap_free = merged
 
     def fail(self, message):
         sys.stderr.write("render-oracle FAIL frame=%d: %s\n"
@@ -826,7 +859,10 @@ class RenderOracle:
             size = self.rd32(machine.uc.reg_read(UC_X86_REG_ESP) + 4)
             return self.game_malloc(size)
         m.override_call(MALLOC, do_malloc)
-        m.override_call(FREE, lambda machine: 0)
+        def do_free(machine):
+            self.game_free(self.rd32(machine.uc.reg_read(UC_X86_REG_ESP) + 4))
+            return 0
+        m.override_call(FREE, do_free)
 
         def seam(machine):
             esp = machine.uc.reg_read(UC_X86_REG_ESP)
@@ -861,10 +897,20 @@ class RenderOracle:
 
         def heap_alloc(machine):
             esp = machine.uc.reg_read(UC_X86_REG_ESP)
+            flags = self.rd32(esp + 8)
             size = self.rd32(esp + 0xC)
-            return self.game_malloc(size)
+            ptr = self.game_malloc(size)
+            if flags & 8:  # HEAP_ZERO_MEMORY
+                machine.uc.mem_write(ptr, bytes(size))
+            return ptr
         m.stub("HeapAlloc", heap_alloc, args_pop=12)
-        m.stub("HeapFree", lambda machine: 1, args_pop=12)
+        def heap_free(machine):
+            ptr = self.rd32(machine.uc.reg_read(UC_X86_REG_ESP) + 0xC)
+            if not ptr:
+                return 0
+            self.game_free(ptr)
+            return 1
+        m.stub("HeapFree", heap_free, args_pop=12)
         m.stub("InitializeCriticalSectionAndSpinCount",
                lambda machine: 1, args_pop=8)
         m.stub("InitializeCriticalSection", lambda machine: 1, args_pop=4)

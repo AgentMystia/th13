@@ -39,7 +39,7 @@ import sys
 import time
 
 from unicorn import UcError, UC_HOOK_CODE, UC_HOOK_MEM_WRITE
-from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBP, UC_X86_REG_EDI,
+from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_EDX, UC_X86_REG_EBP, UC_X86_REG_EDI,
                                UC_X86_REG_ESP, UC_X86_REG_EIP, UC_X86_REG_ECX,
                                UC_X86_REG_ESI)
 
@@ -104,6 +104,133 @@ REPLAY_INPUT_VK = (
 )
 PLAYER_ANM = {0: "pl00.anm", 1: "pl01.anm", 2: "pl02.anm", 3: "pl03.anm"}
 
+# ---- 音频请求设备状态（0x461830 入队 → 0x460dd0 worker 完成）----
+# 0x461830 只把 {code,value,name} 写入管理器 0x4df1a0+0x2320 起的 0x1f
+# 条请求队列（00461830.c:17-30；name 源=EDI）。真正的全局状态写在音频
+# worker 0x460dd0：
+#   case1（00460dd0.c:44-56 / 反汇编 0x460e64-0x460ea6）：
+#     FUN_00460650(value) 把队列 name 拷入预载表
+#     0x4e3640 + value*0x400（00460650.c:17,43；stride 0x100 dwords）。
+#   case2 state==1（00460dd0.c:60-80 / 反汇编 0x4611ad-0x4611d9）：
+#     value>=0 取预载表 [value]，value<0（如 0xffffffff）取队列 name，
+#     逐字节拷入 0x4e13c0（当前 BGM 名）。0x405a20/0x405b80 随后把
+#     0x4e13c0 拷到局部并对 '.' 做 strchr——空串即 strchr 返回 NULL 后
+#     裸写崩（0x405a20 的写点在 0x405b1d；本 oracle 曾因只处理 code2、
+#     预载表恒空而踩中）。
+# 表区间：0x4e3640..0x4e4640（4 个 0x400 槽；0x4e4640 起是 "thbg"
+# 路径全局，00460650.c:58）。本 oracle 无音频线程/DirectSound 设备，
+# 请求在 0x461830 边界同步完成（设备存在时的等价完成序：队列按提交
+# 顺序处理）；不改游戏全局 DAT_004df1b0 等管理器字段，避免音频域
+# 状态外溢到门禁面。
+AUDIO_PRELOAD_TABLE = 0x004E3640
+AUDIO_PRELOAD_STRIDE = 0x400
+AUDIO_PRELOAD_SLOTS = 4
+AUDIO_CURRENT_BGM = 0x004E13C0
+
+
+class NativeReplayInputAudit:
+    """Observe 448200's active slot and cursor without changing replay state.
+
+    448200 uses mgr+218 as a *stage number*, mgr+dc+slot*28 as
+    its signed frame counter, mgr+cc+slot*28 as the current byte pointer,
+    and mgr+d8+slot*28 as the stage header. 448ec0 switches slots and
+    resets their counters; 449070 can restore the next stage earlier.
+    """
+    def __init__(self, oracle):
+        self.oracle = oracle
+        self.pending = None
+        self.input_frames = 0
+        self.slots = {}
+        self.last_slot = None
+
+    def error(self, frame, reason, got="", want=""):
+        errors = self.oracle.replay_edge_mismatches
+        if len(errors) < 8:
+            errors.append((frame, reason, str(got), "", str(want), "", ""))
+
+    def entry(self, manager):
+        o = self.oracle
+        frame = o.frame - o.battle_first if o.battle_first is not None else -1
+        if self.pending is not None:
+            self.error(frame, "nested-replay-consumer")
+        raw_slot = o.rd32(manager + 0x218)
+        slot = raw_slot if raw_slot < 0x80000000 else raw_slot - 0x100000000
+        event = {"frame": frame, "manager": manager, "slot": slot,
+                 "gameinf": o.rd32(GAMEINF), "global_counter": o.rd32(manager + 0x210)}
+        if event["gameinf"] and slot >= 0:
+            base = manager + (slot * 5 + 0x19) * 8
+            count = o.rd32(base + 0x14)
+            event.update(slot_frame=count if count < 0x80000000 else count - 0x100000000,
+                         start=o.rd32(base), cursor=o.rd32(base + 4),
+                         end=o.rd32(base + 8), header=o.rd32(base + 0x10))
+        self.pending = event
+
+    def returned(self):
+        o = self.oracle
+        event = self.pending
+        self.pending = None
+        if event is None:
+            self.error(o.frame - (o.battle_first or 0), "replay-return-without-entry")
+            return
+        frame, slot = event["frame"], event["slot"]
+        got = tuple(o.rd32(a) & 0xffff for a in
+                    (INPUT_HELD, INPUT_PRESSED, INPUT_RELEASED))
+        event["input"] = got
+        stages = {stage.number: stage for stage in o.replay.stages}
+        stage = stages.get(slot)
+        index = event.get("slot_frame")
+        if not event["gameinf"] or slot < 0 or index is None or index < 0:
+            event["status"] = "inactive"
+            if frame >= 0:
+                self.error(frame, "replay-inactive", slot, index)
+        elif stage is None:
+            event["status"] = "unknown-slot"
+            self.error(frame, "unknown-replay-slot", slot)
+        elif index >= stage.frame_count:
+            event["status"] = "exhausted"
+            self.error(frame, "stage-input-exhausted", "%d:%d" % (slot, index),
+                       stage.frame_count)
+        else:
+            want = stage.frame(index)
+            event["expected"] = want
+            event["status"] = "sentinel" if want == (0xffff, 0xffff, 0xffff) else "input"
+            base = event["manager"] + (slot * 5 + 0x19) * 8
+            actual = tuple(struct.unpack("<HHH", bytes(o.uc.mem_read(event["cursor"], 6))))
+            if actual != want or event["cursor"] != event["start"] + 6 * index:
+                self.error(frame, "replay-source", "%d:%d:%s" % (slot, index, actual), want)
+            if event["header"] == 0 or o.rd32(event["header"] + 4) != stage.frame_count:
+                self.error(frame, "replay-header", slot, stage.frame_count)
+            if self.last_slot != slot:
+                if self.last_slot is not None:
+                    previous = stages[self.last_slot]
+                    if self.slots[self.last_slot] != previous.frame_count:
+                        self.error(frame, "replay-slot-incomplete", self.slots[self.last_slot],
+                                   previous.frame_count)
+                    if slot != self.last_slot + 1:
+                        self.error(frame, "replay-slot-order", slot, self.last_slot + 1)
+                if index != 0:
+                    self.error(frame, "replay-slot-start", index, 0)
+                self.last_slot = slot
+            expected_index = self.slots.get(slot, 0)
+            if index != expected_index:
+                self.error(frame, "replay-slot-frame", index, expected_index)
+            if want == (0xffff, 0xffff, 0xffff):
+                if got != (0, 0, 0):
+                    self.error(frame, "replay-sentinel-input", got, (0, 0, 0))
+                self.error(frame, "replay-sentinel", slot, index)
+            else:
+                if got != want:
+                    self.error(frame, "replay-input", got, want)
+                after_cursor, after_count = o.rd32(base + 4), o.rd32(base + 0x14)
+                event["cursor_after"], event["slot_frame_after"] = after_cursor, after_count
+                if after_cursor != event["cursor"] + 6 or after_count != index + 1:
+                    self.error(frame, "replay-cursor-advance", "%d:%d" % (after_cursor, after_count),
+                               "%d:%d" % (event["cursor"] + 6, index + 1))
+                self.slots[slot] = expected_index + 1
+                self.input_frames += 1
+        if getattr(o, "_replay_input_log", None):
+            o._replay_input_log.write(json.dumps(event, separators=(",", ":")) + "\n")
+
 
 class BattleOracle(TitleOracle):
     def __init__(self, exe_path, raw_dir, out_path):
@@ -126,9 +253,45 @@ class BattleOracle(TitleOracle):
         self.enemy_update_zero_frames = 0
         self.target_frames = 1200
         self.family_ops = {}               # 纹理名→首现帧（捕获面证据）
+        self.resource_reads = {}
+        self.resource_misses = set()
+        self.diagnostic_dir = "artifacts/tmp-scratch"
+        self.state_v2 = False
+        self.semantic_state = False
+        self.entity_events = False
+        self.native_replay = True
+        self.retail_loader = False
+        self.menu_replay = False
+        self.boot_seed = 0
+        self.draw_log = True
+
+    def record_resource(self, path, data):
+        import hashlib
+        digest = hashlib.sha256(data).hexdigest()
+        prior = self.resource_reads.setdefault(path, digest)
+        if prior != digest:
+            self.fail("resource changed during capture: %s" % path)
 
     def install_overrides(self):
         super().install_overrides()
+        # 0042c490 supplies EDI=0042bf90 to 0043b280, which calls
+        # _beginthreadex with its argument at [esp+16]. Keep the existing
+        # thread API stub, but retain each battle-loader request for the
+        # frame supervisor instead of treating the first load as permanent.
+        self.pending_battle_loader = None
+        def begin_thread(mm):
+            esp = mm.uc.reg_read(UC_X86_REG_ESP)
+            start, argument = self.rd32(esp + 12), self.rd32(esp + 16)
+            if start == 0x0042BF90:
+                if self.pending_battle_loader is not None:
+                    self.fail("overlapping battle loader requests")
+                self.pending_battle_loader = (argument, self.rd32(GAMEINF), self.frame)
+                sys.stderr.write("BATTLE-THREAD request frame=%d start=%08x arg=%08x gameinf=%08x\n"
+                                 % (self.frame, start, argument, self.rd32(GAMEINF)))
+            return 0
+        # The inherited override already owns the machine watch; replacing
+        # its handler avoids registering a second return hook at this address.
+        self.m._overrides[0x0047BAF0] = (begin_thread, 0)
         # 拆除事件窗时代的内部地址覆写——全链路（真调度器）语境下的误伤件：
         # render_oracle.py:835 把 0x46f820 桩为「死亡炸裂环弹返 0」（事件窗
         # 里它只被 ECL 561 路径以 6 参调用），但 0x46f820 本体是**通用 ANM
@@ -144,17 +307,250 @@ class BattleOracle(TitleOracle):
         self._lift_override(0x00461CB0, "按弹种建弹体 ANM（同上）")
         # 敌机伤害/死亡链不能沿用无输入窗的空转桩。
         self._lift_override(0x00419A90, "敌机击杀链（有输入窗必需）")
-        # BGM 变体启动（0x405a20）：战斗 f200 起把曲名 '.' 位替换 'b' 变体并
-        # 0x43afc0 播放——曲名表由音频系统解析 thbgm.fmt 产生（桩环境缺席，
-        # 名字空 → strchr('.') 返 0 → 0x405b1d 裸写崩，hud-capture-plan §5.2
-        # 「曲名表读取」预言项）。音频域不在门禁内：按其 <200 帧早退分支语义
-        # 桩为 ret -1（登记：跳过 DAT_004be830|=0x100 与 [esi+0x14] 位写——
-        # 音频标志面，窗口若在此分歧再启用真表解析）。
-        self.m.override_call(0x00405A20, lambda mm: 0xFFFFFFFF, ret_pop=4)
+        # 405a20 is Trance activation, not a music-only helper. Its gameplay
+        # writes and return value must execute, including death protection.
+        self._lift_override(0x00405A20, "灵界启动/死亡保护，不能作为音频桩")
+        self._lift_override(0x00460C50, "SFX queue receives original position and event")
+        self.audio_requests = []
+        self.audio_diagnostics = []
+
+        # Execute the original enqueue including full-queue handling; complete
+        # it synchronously at its return because the audio worker is absent.
+        # Worker scheduling and codes beyond the model remain unqualified.
+        self._audio_pending_manager = None
+        def audio_enqueue_entry(uc, addr, size, ud):
+            self._audio_pending_manager = uc.reg_read(UC_X86_REG_EAX)
+        def audio_enqueue_return(uc, addr, size, ud):
+            mgr = self._audio_pending_manager
+            if not mgr:
+                return
+            for index in range(31):
+                entry = mgr + 0x2320 + index * 0x10C
+                code = self.rd32(entry)
+                if not code:
+                    break
+                value = self.rd32(entry + 4)
+                name = bytes(self.cstr(entry + 12))
+                self.audio_requests.append((self.frame, code, value, name.hex()))
+                self._complete_audio_request(code, value, name)
+                self.wr32(entry, 0)
+            self._audio_pending_manager = None
+        self.uc.hook_add(UC_HOOK_CODE, audio_enqueue_entry,
+                         begin=0x00461830, end=0x00461830)
+        self.uc.hook_add(UC_HOOK_CODE, audio_enqueue_return,
+                         begin=0x004618BF, end=0x004618BF)
         # 帧率步进 0x476e00（x87 读 D3D caps [esi+0xc]+0x90——假设备该页未
         # 映射）：纯等待/跳帧语义（void），GameOver 入口 0x43f570 链首次触达
         # （M1.3b f1202 崩点）。空转桩（无状态写，时序域不在门禁内）。
         self.m.override_call(0x00476E00, lambda mm: 0)
+        # 0043a040 seeds both RNG objects from timeGetTime() low 16 bits.
+        # The synthetic clock input is recorded, never inferred from output.
+        self.m.stub("timeGetTime", lambda mm: self.boot_seed, args_pop=0)
+        def interlocked_increment(mm):
+            esp = mm.uc.reg_read(UC_X86_REG_ESP)
+            address = self.rd32(esp + 4)
+            value = (self.rd32(address) + 1) & 0xFFFFFFFF
+            self.wr32(address, value)
+            return value
+        self.m.stub("InterlockedIncrement", interlocked_increment, args_pop=4)
+        # The uninitialized MSVC CRT floating formatter emits non-ASCII bytes
+        # for 0x424a90's "%2.1ffps" (e.g. 0.05 -> f4 f1 b5), which makes
+        # 0x4042a0 index outside ascii.anm. Model this one host formatting
+        # boundary, keep the original text generation and draw callbacks.
+        # Other format strings continue to execute the original CRT.
+        def format_fps(uc, addr, size, ud):
+            esp = uc.reg_read(UC_X86_REG_ESP)
+            dest, fmt, args = (self.rd32(esp + 4), self.rd32(esp + 8),
+                               self.rd32(esp + 12))
+            format_string = bytes(self.cstr(fmt))
+            if format_string not in (b"%2.1ffps", b"%.2fs"):
+                return
+            value_bits = bytes(uc.mem_read(args, 8))
+            value = struct.unpack("<d", value_bits)[0]
+            if format_string == b"%2.1ffps" and value_bits not in (
+                    struct.pack("<d", 0.05),
+                    struct.pack("<d", struct.unpack("<f", b"\xcd\xcc\x4c\x3d")[0])):
+                self.fail("FPS formatter value not yet qualified: %r" % value)
+            if format_string == b"%.2fs":
+                import math
+                if not math.isfinite(value) or not 0 <= value <= 10:
+                    self.fail("trance formatter value out of range: %r" % value)
+            rendered = (format_string.decode("ascii") % value).encode("ascii")
+            uc.mem_write(dest, rendered + b"\0")
+            uc.reg_write(UC_X86_REG_EAX, len(rendered))
+            uc.reg_write(UC_X86_REG_EIP, self.rd32(esp))
+            uc.reg_write(UC_X86_REG_ESP, esp + 4)
+        self.uc.hook_add(UC_HOOK_CODE, format_fps,
+                         begin=0x0047A2F0, end=0x0047A2F0)
+        if self.retail_loader:
+            # Only the file I/O boundary is emulated. 448c40 itself validates,
+            # decrypts, inflates, indexes and 447900 restores the replay.
+            self._replay_file_cursor = 0
+            def replay_exists(mm):
+                esp = mm.uc.reg_read(UC_X86_REG_ESP)
+                name = bytes(self.cstr(self.rd32(esp + 4))).decode("ascii", "replace")
+                base = name.replace("\\", "/").split("/")[-1]
+                path = os.path.join("games/replays", base)
+                if os.path.basename(base) != base or not os.path.isfile(path):
+                    self._replay_file_data = None
+                    return 0
+                self._replay_file_data = open(path, "rb").read()
+                self.record_resource(path, self._replay_file_data)
+                return 1
+            self.m.override_call(0x00472680, replay_exists, ret_pop=4)
+            def replay_open(mm):
+                self._replay_file_cursor = 0
+                return 0
+            def replay_read(mm):
+                count = mm.uc.reg_read(UC_X86_REG_EDI)
+                start = self._replay_file_cursor
+                data = self._replay_file_data[start:start + count]
+                if len(data) != count:
+                    self.fail("retail replay file short read at %d size %d" % (start, count))
+                self._replay_file_cursor += count
+                buf = self.game_malloc(count)
+                mm.uc.mem_write(buf, data)
+                return buf
+            self.m.override_call(0x00472900, replay_open)
+            self.m.override_call(0x00472A20, replay_read)
+            self.m.override_call(0x00472A70, lambda mm: 0)
+            if self.menu_replay:
+                from pathlib import Path
+                replay_names = sorted(p.name for p in Path("games/replays").glob("th13_ud????.rpy"))
+                self._find_replays = iter(replay_names)
+                def write_find(mm, output):
+                    try:
+                        name = next(self._find_replays)
+                    except StopIteration:
+                        return False
+                    mm.uc.mem_write(output, b"\0" * 320)
+                    mm.uc.mem_write(output + 44, name.encode("ascii") + b"\0")
+                    return True
+                def find_first(mm):
+                    esp = mm.uc.reg_read(UC_X86_REG_ESP)
+                    pattern = bytes(self.cstr(self.rd32(esp + 4)))
+                    if pattern != b"th13_ud????.rpy":
+                        self.fail("unexpected replay enumeration pattern %r" % pattern)
+                    return 0x7131 if write_find(mm, self.rd32(esp + 8)) else 0xFFFFFFFF
+                def find_next(mm):
+                    esp = mm.uc.reg_read(UC_X86_REG_ESP)
+                    return int(write_find(mm, self.rd32(esp + 8)))
+                self.m.stub("FindFirstFileA", find_first, args_pop=8)
+                self.m.stub("FindNextFileA", find_next, args_pop=8)
+                self.m.stub("FindClose", lambda mm: 1, args_pop=4)
+
+    def _complete_audio_request(self, code, value, name):
+        """同步完成 0x461830 请求（设备存在时的 0x460dd0 worker 语义）。
+
+        证据（反编译 + 反汇编）：
+          code1 → FUN_00460650(value) 把 name 写入
+                  0x4e3640 + value*0x400（00460650.c:17,43；
+                  00460dd0.c:44-56 / 0x460e96-0x460e9d 的 EAX=&entry.name）。
+          code2 → value>=0 取预载表 [value]，value<0 取请求 name，拷入
+                  0x4e13c0（00460dd0.c:60-80 / 0x4611ad-0x4611d9）。
+        越界槽不写（表只有 4 个 0x400 槽，0x4e4640 起是 "thbg" 路径全局），
+        登记诊断——不伪造曲名。
+        """
+        if code == 1:
+            if 0 <= value < AUDIO_PRELOAD_SLOTS:
+                self.uc.mem_write(AUDIO_PRELOAD_TABLE + value * AUDIO_PRELOAD_STRIDE,
+                                  bytes(name) + b"\0")
+                return
+            diag = ("code1 slot %d outside preload table [0,%d)"
+                    % (value, AUDIO_PRELOAD_SLOTS))
+        elif code == 2:
+            if value & 0x80000000:
+                selected = bytes(name)
+                source = "request"
+            elif value < AUDIO_PRELOAD_SLOTS:
+                selected = bytes(self.cstr(
+                    AUDIO_PRELOAD_TABLE + value * AUDIO_PRELOAD_STRIDE))
+                source = "preload[%d]" % value
+            else:
+                selected = b""
+                source = "slot-out-of-range[%d]" % value
+            self.uc.mem_write(AUDIO_CURRENT_BGM, selected + b"\0")
+            if not selected:
+                # 空名是 0x405a20/0x405b80 的 strchr('.') 崩溃前提；登记
+                # 供正负控断言，不做“补名”兜底。
+                diag = ("code2 %s produced empty 0x4e13c0 "
+                        "(0x405a20/0x405b80 would fault at strchr)" % source)
+            else:
+                return
+        else:
+            return
+        self.audio_diagnostics.append((self.frame, diag))
+        sys.stderr.write("AUDIO-DIAG frame=%d %s\n" % (self.frame, diag))
+
+    def install_sound_buffers(self):
+        """Provide the SFX buffers the absent DirectSound worker would load.
+
+        0045fea0 initializes 71 indexed records and 00461490 creates their
+        IDirectSoundBuffer objects from the WAV table at 0x4bb320. This models
+        the device boundary only: gameplay sound queue functions still run.
+        Missing project WAVs remain null and are reported.
+        """
+        host = self.com
+        self.sound_buffer_states = {}
+        def call_arg(mm, index):
+            return self.rd32(mm.uc.reg_read(UC_X86_REG_ESP) + 4 + index * 4)
+        def state(mm):
+            return self.sound_buffer_states[call_arg(mm, 0)]
+        def set_pan(mm):
+            state(mm)["pan"] = call_arg(mm, 1)
+            return 0
+        def play(mm):
+            state(mm)["playing"] = True
+            return 0
+        def stop(mm):
+            state(mm)["playing"] = False
+            return 0
+        def status(mm):
+            self.wr32(call_arg(mm, 1), int(state(mm)["playing"]))
+            return 0
+        slots = {offset: host.method("sound." + name, nargs, fn)
+                 for offset, name, nargs, fn in (
+                     (0x04, "AddRef", 1, lambda mm: 1),
+                     (0x08, "Release", 1, lambda mm: 1),
+                     (0x24, "GetStatus", 2, status),
+                     (0x30, "Play", 4, play),
+                     (0x34, "SetCurrentPosition", 2, lambda mm: 0),
+                     (0x3C, "SetVolume", 2, lambda mm: 0),
+                     (0x40, "SetPan", 2, set_pan),
+                     (0x48, "Stop", 1, stop))}
+        vt = host.make_vtable(slots)
+        descriptors = {}
+        for offset in range(100):
+            address = 0x004BAD90 + offset * 20
+            index = self.rd32(address)
+            if index < 71:
+                descriptors.setdefault(index, address)
+        missing = []
+        for index in range(71):
+            record = 0x004E0C28 + index * 24
+            descriptor = descriptors.get(index)
+            if descriptor is None:
+                missing.append("descriptor:%d" % index)
+                continue
+            name_index = self.rd32(descriptor + 4)
+            name_ptr = self.rd32(0x004BB320 + name_index * 4)
+            name = bytes(self.cstr(name_ptr)).decode("ascii", "replace")
+            path = os.path.join(self.raw_dir, name)
+            if not os.path.isfile(path):
+                missing.append(name)
+                continue
+            with open(path, "rb") as sound_file:
+                self.record_resource(path, sound_file.read())
+            obj = host.make_object(vt)
+            self.sound_buffer_states[obj] = {"name": name, "pan": 0, "playing": False}
+            self.wr32(record, obj)
+            self.wr32(record + 4, 0xFFFFFFFF)
+            self.wr32(record + 8, descriptor)
+            self.wr32(record + 12, index)
+        for index in range(12):
+            self.wr32(0x004DF1C0 + index * 4, 0xFFFFFFFF)
+        sys.stderr.write("SOUND-BUFFERS loaded=%d missing=%s (device model; worker not run)\n"
+                         % (len(self.sound_buffer_states), missing))
 
     def _lift_override(self, address, why):
         """摘除 override_call 的内部地址覆写（真机链路恢复原生执行）。"""
@@ -168,13 +564,141 @@ class BattleOracle(TitleOracle):
 
     def install_hooks(self):
         super().install_hooks()
+        if os.environ.get("TH13_VISUAL_RNG_TRACE"):
+            self._visual_rng_trace = open(os.path.join(
+                self.diagnostic_dir, "battle-visual-rng-trace.jsonl"), "w")
+            def visual_rng_call(uc, addr, size, ud):
+                if uc.reg_read(UC_X86_REG_ESI) != 0x004DC31C:
+                    return
+                self._visual_rng_trace.write(json.dumps({
+                    "frame": self.frame, "function": "%08x" % addr,
+                    "caller": "%08x" % self.rd32(uc.reg_read(UC_X86_REG_ESP)),
+                    "stack": ["%08x" % self.rd32(uc.reg_read(UC_X86_REG_ESP) + 4 * i)
+                              for i in range(1, 9)],
+                    "eax": "%08x" % uc.reg_read(UC_X86_REG_EAX),
+                    "edi": "%08x" % uc.reg_read(UC_X86_REG_EDI),
+                    "seed": self.rd32(0x004DC31C) & 0xFFFF,
+                    "index": self.rd32(0x004DC320)}, separators=(",", ":")) + "\n")
+            for addr in (0x00472C20, 0x00472C90):
+                self.uc.hook_add(UC_HOOK_CODE, visual_rng_call, begin=addr, end=addr)
+            def visual_checkpoint(uc, addr, size, ud):
+                self._visual_rng_trace.write(json.dumps({
+                    "frame": self.frame, "checkpoint": "%08x" % addr,
+                    "seed": self.rd32(0x004DC31C) & 0xFFFF,
+                    "index": self.rd32(0x004DC320)}, separators=(",", ":")) + "\n")
+            for addr in (0x00447C90, 0x00447CEA, 0x0042BD62,
+                         0x0042BD67, 0x00448EC0, 0x00449070):
+                self.uc.hook_add(UC_HOOK_CODE, visual_checkpoint, begin=addr, end=addr)
+        if self.entity_events:
+            self._entity_log = open(os.path.join(self.diagnostic_dir,
+                                                "battle-entity-births.jsonl"), "w")
+            self._entity_sequence = 0
+            def entity_birth(uc, addr, size, ud):
+                row = {"frame": self.frame - self.battle_first
+                       if self.battle_first is not None else None,
+                       "global_frame": self.frame, "sequence": self._entity_sequence}
+                if addr == 0x0040E84D:
+                    base = uc.reg_read(UC_X86_REG_EBX)
+                    mgr = self.rd32(0x004C2174)
+                    if not base:
+                        return
+                    delta = base - mgr - 0x90
+                    if delta < 0 or delta % 0x135C or delta // 0x135C >= 2000:
+                        self.fail("bullet birth outside pool: %08x" % base)
+                    row.update(kind="bullet", slot=delta // 0x135C)
+                else:
+                    base = uc.reg_read(UC_X86_REG_EAX)
+                    mgr = self.rd32(0x004C22C4)
+                    delta = base - mgr - 0x6A0
+                    if delta < 0 or delta % 0x9C or delta // 0x9C >= 256:
+                        self.fail("shot birth outside pool: %08x" % base)
+                    row.update(kind="player_shot", slot=delta // 0x9C)
+                self._entity_sequence += 1
+                self._entity_log.write(json.dumps(row, separators=(",", ":")) + "\n")
+            for addr in (0x0040E84D, 0x00445C40):
+                self.uc.hook_add(UC_HOOK_CODE, entity_birth, begin=addr, end=addr)
+        if os.environ.get("TH13_SOUND_TRACE"):
+            self._sound_trace = open(os.path.join(self.diagnostic_dir,
+                                                 "battle-sound-trace.jsonl"), "w")
+            def sound_event(uc, addr, size, ud):
+                esp = uc.reg_read(UC_X86_REG_ESP)
+                row = {"frame": self.frame - self.battle_first
+                       if self.battle_first is not None else None,
+                       "global_frame": self.frame, "address": "%08x" % addr,
+                       "caller": "%08x" % self.rd32(esp)}
+                if addr == 0x00460C50:
+                    row.update(sound_id=uc.reg_read(UC_X86_REG_EDI),
+                               x_bits=self.rd32(esp + 4))
+                elif addr == 0x00460BC0:
+                    row.update(sound_id=uc.reg_read(UC_X86_REG_EDX))
+                else:
+                    pos = self.rd32(esp + 8)
+                    row.update(kind=self.rd32(esp + 4),
+                               x_bits=self.rd32(pos) if self._mapped(pos) else None,
+                               sound_flag=self.rd32(esp + 16))
+                self._sound_trace.write(json.dumps(row, separators=(",", ":")) + "\n")
+            for addr in (0x00438EC0, 0x00460C50, 0x00460BC0):
+                self.uc.hook_add(UC_HOOK_CODE, sound_event, begin=addr, end=addr)
+        if os.environ.get("TH13_TEXTURE_TRACE"):
+            self._texture_trace = open(os.path.join(self.diagnostic_dir,
+                                                   "battle-texture-trace.jsonl"), "w")
+            def bind_sprite(uc, addr, size, ud):
+                vm = uc.reg_read(UC_X86_REG_EAX)
+                esp = uc.reg_read(UC_X86_REG_ESP)
+                anm = uc.reg_read(UC_X86_REG_EDX)
+                sprite = uc.reg_read(UC_X86_REG_ECX)
+                if not anm or not self._mapped(anm + 0x11c):
+                    return
+                table = self.rd32(anm + 0x11c)
+                entry = table + sprite * 0x48
+                self._texture_trace.write(json.dumps({
+                    "frame": self.frame, "vm": vm, "anm": anm,
+                    "sprite": sprite, "table": table, "entry": entry,
+                    "holder": self.rd32(entry + 8) if self._mapped(entry + 8) else None,
+                    "caller": self.rd32(esp)}, separators=(",", ":")) + "\n")
+            self.uc.hook_add(UC_HOOK_CODE, bind_sprite,
+                             begin=0x00461A60, end=0x00461A60)
+            def draw_popup(uc, addr, size, ud):
+                record = uc.reg_read(UC_X86_REG_EBX)
+                cursor = uc.reg_read(UC_X86_REG_EDX)
+                value = bytes(uc.mem_read(cursor, 1))[0]
+                typ = self.rd32(record + 0x20)
+                if value > 20:
+                    self._texture_trace.write(json.dumps({"frame": self.frame,
+                        "popup_record": record, "cursor": cursor,
+                        "byte": value, "type": typ,
+                        "record_hex": bytes(uc.mem_read(record, 0x40)).hex()},
+                        separators=(",", ":")) + "\n")
+            self.uc.hook_add(UC_HOOK_CODE, draw_popup,
+                             begin=0x0044AB66, end=0x0044AB66)
+            def text_format(uc, addr, size, ud):
+                ebp = uc.reg_read(UC_X86_REG_EBP)
+                fmt = self.rd32(ebp + 8)
+                dest = ebp - 0x104
+                fmt_bytes = bytes(self.cstr(fmt))
+                result = bytes(self.cstr(dest))
+                if any(b >= 0x80 for b in result):
+                    self._texture_trace.write(json.dumps({"frame": self.frame,
+                        "format_hex": fmt_bytes.hex(), "result_hex": result.hex(),
+                        "args_hex": bytes(uc.mem_read(ebp + 12, 16)).hex(),
+                        "caller": self.rd32(ebp + 4)}, separators=(",", ":")) + "\n")
+            self.uc.hook_add(UC_HOOK_CODE, text_format,
+                             begin=0x00404107, end=0x00404107)
         # 原版回放消费相位取证：0x448200 每次入口计数（真机里它由
         # 0x448e40 thunk 从 update 任务队列进入；本窗由 consume_replay_frame
         # 帧首直调一次，计数与 replay_consumed 逐帧对照）。
         def on_replay_consume(uc, addr, size, ud):
             self.replay_consumed += 1
+            if self.native_replay and self.replay_stage is not None:
+                self.replay_input_audit.entry(uc.reg_read(UC_X86_REG_ESI))
         self.uc.hook_add(UC_HOOK_CODE, on_replay_consume,
                          begin=REPLAY_CONSUME, end=REPLAY_CONSUME)
+        def on_native_replay_return(uc, addr, size, ud):
+            if not self.native_replay or self.replay_stage is None:
+                return
+            self.replay_input_audit.returned()
+        self.uc.hook_add(UC_HOOK_CODE, on_native_replay_return,
+                         begin=0x00448E48, end=0x00448E48)
         # 双跑防护（plan §1.5）：0x418e00 每帧恰一次——路径 A 下它由 0x418d30
         # 注册的任务 thunk 驱动；手工驱动或双注册会破坏事件流等价性。
         def on_enemy_update(uc, addr, size, ud):
@@ -236,7 +760,7 @@ class BattleOracle(TitleOracle):
             # 钩子相位=0x449035（回滚写后）：本体回滚与输入清零已生效。
             # 到达该地址仅可能来自 mgr+0x10==1 分支（0x448f4a jne
             # 0x448fd3 / 0x448fd6 jne 0x44905e 唯一路径）。
-            if getattr(self, "replay_stage", None) is None:
+            if getattr(self, "replay_stage", None) is None or self.native_replay:
                 return
             mgr = self.rd32(REPLAY_MGR)
             if not mgr or self.rd32(mgr + 0x10) != 1:
@@ -395,7 +919,7 @@ class BattleOracle(TitleOracle):
                     out.append("%08x%s eax=%08x ebx=%08x esi=%08x"
                                % (a, "(%s)" % names[a] if a in names else "",
                                   eax, ebx, esi))
-                path = "artifacts/tmp-scratch/battle-crash-trace.txt"
+                path = os.path.join(self.diagnostic_dir, "battle-crash-trace.txt")
                 with open(path, "w") as trace_file:
                     trace_file.write("\n".join(out))
                 sys.stderr.write("[trace] %d instrs -> %s\n"
@@ -420,19 +944,22 @@ class BattleOracle(TitleOracle):
         0x42b990 else 分支跳过 0x447ed0 → 0x424fd0 以未构造的 EBX=
         stage-ctx 写 +0x14c → 0x424fe4 冷启动崩，0042b990.c:175-191 +
         00424fd0.c:15-20 反编译链）。"""
+        if getattr(self, "menu_replay", False):
+            return
         if self.battle_requested:
             return
         if self.rd32(SCENE_CUR) != 4:
             return
         # __new__ 构造的最小测试副本可能未带 replay 成员（默认非回放）。
         if getattr(self, "replay_stage", None) is not None:
+            stage = self.replay_stage.number
             self.wr32(DAT_DIFFICULTY, self.difficulty)
             self.wr32(DAT_CHARACTER, self.character)
             self.wr32(DAT_SHOT_TYPE, self.shot_type)
             self.wr32(DAT_SPELL, 0xFFFFFFFF)
-            self.wr32(DAT_81C, 1)
-            self.wr32(DAT_820, 1)
-            self.wr32(DAT_STAGETABLE, STAGE1_TABLE)
+            self.wr32(DAT_81C, stage)
+            self.wr32(DAT_820, stage)
+            self.wr32(DAT_STAGETABLE, 0x004BB4F0 + stage * 0x7C)
         else:
             self.wr32(DAT_DIFFICULTY, self.difficulty)
             self.wr32(DAT_CHARACTER, self.character)
@@ -442,7 +969,10 @@ class BattleOracle(TitleOracle):
             self.wr32(DAT_81C, 1)
             self.wr32(DAT_820, 1)
             self.wr32(DAT_STAGETABLE, STAGE1_TABLE)
-        self.wr32(SCENE_NEXT, 7)
+        if getattr(self, "retail_loader", False) and getattr(self, "replay_stage", None) is not None:
+            self.uc.mem_write(REPLAY_SHELL, self._replay_file_name.encode("ascii") + b"\0")
+        self.wr32(SCENE_NEXT, 13 if getattr(self, "retail_loader", False)
+                  and getattr(self, "replay_stage", None) else 7)
         self.battle_requested = True
         sys.stderr.write("BATTLE-REQUEST frame=%d diff=%d char=%d\n"
                          % (self.frame, self.rd32(DAT_DIFFICULTY),
@@ -551,10 +1081,22 @@ class BattleOracle(TitleOracle):
         # 清零——启动写是原版解除拦截的同拍语义。真机 0x42c550 同帧稍后
         # 触达 0x448ec0 时对已消费游标是回滚（P2-2），由 install_hooks 的
         # on_replay_ec0 防护消除——见 run 的启动点与防护注释。
-        self.wr32(mgr + 0x218, stage_number)
-        self.wr32(base + 4, self.rd32(base))
-        self.wr32(base + 0xC, self.rd32(base + 8))
-        self.wr32(base + 0x14, 0)
+        if getattr(self, "native_replay", False):
+            # 00447cea..00447d20 registers replay update/draw callbacks with
+            # priorities 12/30/64. 00448ec0 enables them and initializes the
+            # cursor; do not pre-consume or rewrite its state in this mode.
+            for field, function, priority, register in (
+                    (8, 0x00448E40, 12, 0x00470FF0),
+                    (0x214, 0x00448E50, 30, 0x00470FF0),
+                    (0xC, 0x00448EA0, 64, 0x00471050)):
+                task = self.drive(register, args=[function, mgr],
+                                  regs={"ebx": priority}, timeout_ms=60000)
+                self.wr32(mgr + field, task)
+        else:
+            self.wr32(mgr + 0x218, stage_number)
+            self.wr32(base + 4, self.rd32(base))
+            self.wr32(base + 0xC, self.rd32(base + 8))
+            self.wr32(base + 0x14, 0)
         # 待证面登记（P3-5）：0x448200:35 内调 FUN_00414f30(0x4e49f0)——
         # 0x414f30 读 +0x218 当帧态、维护 +0x94 连打计数、写 +0x224/+0x228
         # 沿；本窗 0x4e49f0 由零售 0x439ee0→0x471620 每帧真打包（帧首
@@ -643,9 +1185,14 @@ class BattleOracle(TitleOracle):
         self.phase = "battle_loader"
         # ① 预开六档（窗C 十五轮验证清单，plXX 按角色定档——窗C 硬编码
         # pl01 系其窗选角色 1；0x46df40 在 0x180 预置下非阻塞）
-        preopen = [(slot, PLAYER_ANM.get(self.character, "pl01.anm")
-                    if name == "pl01.anm" else name)
-                   for slot, name in BATTLE_PREOPEN]
+        stage = self.rd32(DAT_81C) if self.replay_stage else 1
+        preopen = []
+        for slot, name in BATTLE_PREOPEN:
+            if name == "pl01.anm":
+                name = PLAYER_ANM.get(self.character, "pl01.anm")
+            elif name in ("st01wl.anm", "st01logo.anm"):
+                name = "st%02d%s" % (stage, name[4:])
+            preopen.append((slot, name))
         for slot, name in preopen:
             nb = self.game_malloc(0x40)
             self.uc.mem_write(nb, name.encode("ascii") + b"\0")
@@ -663,13 +1210,21 @@ class BattleOracle(TitleOracle):
         from .machine import RET_MAGIC
         from .title_oracle import LOADER_STACK, BARRIER_ADDR
         esp = LOADER_STACK
-        self.uc.mem_write(esp, struct.pack("<I", RET_MAGIC))
+        request = self.pending_battle_loader
+        self.pending_battle_loader = None
+        argument = request[0] if request else 0
+        self.uc.mem_write(esp, struct.pack("<II", RET_MAGIC, argument))
         self.uc.reg_write(UC_X86_REG_ESP, esp)
         self.uc.reg_write(UC_X86_REG_EBP, esp + 0x400)
         for reg in (UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX,
                     UC_X86_REG_EDX, UC_X86_REG_ESI):
             self.uc.reg_write(reg, 0)
         self.loader_draining = True
+        # This driver runs the whole loader without an instruction budget.
+        # The inherited barrier is for the sliced title loader; stopping and
+        # restarting this atomic run at 418d30 can miss its return boundary
+        # on a later load and execute all the way to RET_MAGIC.
+        self._barrier_atomic = True
         eip = BATTLE_THREAD
         barriers = 0
         try:
@@ -693,6 +1248,7 @@ class BattleOracle(TitleOracle):
                     continue
                 break
         finally:
+            self._barrier_atomic = False
             self.loader_draining = False
         scene7 = self.rd32(GAMEINF)
         sys.stderr.write(
@@ -714,8 +1270,21 @@ class BattleOracle(TitleOracle):
         # 0x449070 恢复（种子/0x58 初值逐位断言内建）。此后 scene7
         # 首帧 0x42c550:80 触达 0x448ec0 回放分支（mgr+0x10==1 判据），
         # EC0 防护（0x449035 钩，已批 review 修复相位）消除回滚。
-        if getattr(self, "replay_stage", None) is not None:
+        if getattr(self, "replay_stage", None) is not None and not self.retail_loader:
             self._equip_replay_manager()
+        elif self.replay_stage is not None:
+            manager = self.rd32(REPLAY_MGR)
+            stage_no = self.rd32(DAT_81C)
+            active_stage = next((item for item in self.replay.stages
+                                 if item.number == stage_no), None)
+            if not manager or active_stage is None:
+                self.fail("loaded replay stage has no matching file slot")
+            header = self.rd32(manager + 0xD8 + stage_no * 0x28)
+            if not header or bytes(self.uc.mem_read(header, 0xC4)) != bytes(active_stage.header):
+                self.fail("native replay stage header differs from requested file")
+            first = self.rd32(manager + (stage_no * 5 + 0x19) * 8)
+            if not first or bytes(self.uc.mem_read(first, len(active_stage.input))) != bytes(active_stage.input):
+                self.fail("native replay input differs from requested file")
         self.load_finish()      # 线程体自开的档（st01 名单等）补完成
         # 契约档位（plan §5.2）：**有 score 路径**——开场线程 0x449b00 置位
         # DAT_004dcc30=1（score 系统初始化完成语义，与存档文件存在与否无涉：
@@ -754,14 +1323,40 @@ class BattleOracle(TitleOracle):
         """boot 期沿用 TO 的开场/标题装载体补调；场景 7 请求投递后不再回头
         ——TO 的 title_enable 块（开场计数达 300 时卸载 sig.anm/使能标题任务）
         会在战斗期对已废弃对象误触发（f180 实证：0x46e620 卸载砸穿战斗态）。"""
+        if self.menu_replay and not self.battle_requested:
+            super().thread_bodies()
+            title = self.rd32(0x004C22E0)
+            if (title and self.rd32(title + 0x1C) == 0xB and
+                    self.rd32(title + 0x24) >= 1 and not getattr(self, "_menu_list_loaded", False)):
+                self.drive(0x00452300, timeout_ms=600000)
+                self._menu_list_loaded = True
+                sys.stderr.write("REPLAY-MENU list thread complete frame=%d\n" % self.frame)
+            if self.rd32(GAMEINF):
+                self.battle_requested = True
+                self.battle_loader_body()
+            return
         if not self.battle_requested:
             super().thread_bodies()
             self.maybe_request_battle()
             return
+        if self.battle_loader_done and self.pending_battle_loader is not None:
+            self.battle_loader_started = False
+            self.battle_loader_done = False
         if not self.battle_loader_done:
             self.battle_loader_body()
 
     # ---------- 主流程 ----------
+    def write_frame_line(self, out):
+        if self.draw_log:
+            return super().write_frame_line(out)
+        # All update/draw callbacks and device capture still execute. Preserve
+        # frame number and op count so the same window integrity checks apply.
+        count = len(self.d3d.frame_ops)
+        out.write((json.dumps({"frame": self.frame, "op_count": count},
+                              separators=(",", ":")) + "\n").encode("ascii"))
+        self.frames_out += 1
+        self.per_frame_ops.append(count)
+
     def _mapped(self, addr):
         try:
             self.uc.mem_read(addr, 1)
@@ -911,7 +1506,9 @@ class BattleOracle(TitleOracle):
     def run(self, frames=1200):
         self.install_overrides()
         self.init_ptd()
+        self.init_crt_fpu()
         self.install_d3d()
+        self.install_sound_buffers()
         self.patch_globals_title()
         self.install_hooks()
 
@@ -921,13 +1518,19 @@ class BattleOracle(TitleOracle):
         self.wr32(0x004DC6A4, d3d9_obj)
         if self.drive(0x0045DC80, timeout_ms=30_000) != 0:
             self.fail("device init failed")
+        if getattr(self, "_visual_rng_trace", None):
+            self._visual_rng_trace.write(json.dumps({"checkpoint": "after-device-init", "seed": self.rd32(0x004DC31C) & 0xFFFF, "index": self.rd32(0x004DC320)}) + "\n")
         buf = self.game_malloc(0xF53C48)
         self.uc.mem_write(buf, b"\x00" * 0xF53C48)
         self.drive(ANM_MGR_CTOR, args=[buf], timeout_ms=60_000)
+        if getattr(self, "_visual_rng_trace", None):
+            self._visual_rng_trace.write(json.dumps({"checkpoint": "after-anm-constructor", "seed": self.rd32(0x004DC31C) & 0xFFFF, "index": self.rd32(0x004DC320)}) + "\n")
         self.wr32(0x004DC688, buf)
         self.anm_mgr = buf
         if self.drive(0x0043A440, timeout_ms=120_000) != 0:
             self.fail("scene task registration failed")
+        if getattr(self, "_visual_rng_trace", None):
+            self._visual_rng_trace.write(json.dumps({"checkpoint": "after-scene-registration", "seed": self.rd32(0x004DC31C) & 0xFFFF, "index": self.rd32(0x004DC320)}) + "\n")
 
         out = open(self.out_path, "wb")
         t0 = time.time()
@@ -935,14 +1538,25 @@ class BattleOracle(TitleOracle):
         model = None
         model_misses = []
         self._state_log = None
+        self._menu_tape = None
+        if self.menu_replay:
+            self._menu_tape = open(os.path.join(self.diagnostic_dir, "menu-inputs.jsonl"), "w")
         if os.environ.get("TH13_STATE_LOG"):
             self._state_log = open(
-                "artifacts/tmp-scratch/battle-state-raw.jsonl", "w")
+                os.path.join(self.diagnostic_dir, "battle-state-raw.jsonl"), "w")
+        self._state_v2_log = None
+        if self.state_v2:
+            self._state_v2_log = open(
+                os.path.join(self.diagnostic_dir, "battle-state-raw-v2.jsonl"), "w")
+        self._semantic_log = None
+        if self.semantic_state:
+            self._semantic_log = open(
+                os.path.join(self.diagnostic_dir, "battle-replay-core-v2.jsonl"), "w")
         # 可选原始调用计数与敌机life写点；不能由计数推定子系统身份。
         self._shot_probe = None
         if os.environ.get("TH13_SHOT_PROBE"):
             self._shot_probe = open(
-                "artifacts/tmp-scratch/battle-shot-probe.txt", "w")
+                os.path.join(self.diagnostic_dir, "battle-shot-probe.txt"), "w")
             self._s22_calls = 0
             self._s22_hits = 0
             self._last_s22_calls = 0
@@ -982,23 +1596,31 @@ class BattleOracle(TitleOracle):
             sht_path = os.path.join(self.raw_dir, sht)
             if not os.path.isfile(sht_path):
                 self.fail("replay needs %s in raw dir" % sht)
-            model = PlayerModel(open(sht_path, "rb").read())
+            with open(sht_path, "rb") as sht_file:
+                sht_data = sht_file.read()
+            self.record_resource(sht_path, sht_data)
+            model = PlayerModel(sht_data)
             if os.environ.get("TH13_POS_LOG"):
                 self._pos_log = open(
-                    "artifacts/tmp-scratch/battle-player-pos.txt", "w")
+                    os.path.join(self.diagnostic_dir, "battle-player-pos.txt"), "w")
         # 回放消费取证（TH13_REPLAY_LOG=1）：每战斗帧一行——原版消费器
         # 产出的 0x4e4c08/14/18 与文件帧逐字节对照 + 采样相位
         # （0x448200 每帧恰一次、时序=每帧 title_frame 之前）。
         self._replay_log = None
-        self.replay_consumed = 0        # 0x448200 实际消费帧数
+        self.replay_consumed = 0        # 0x448200 入口次数；槽 EOF 后不等于实际输入数
         self.replay_phase_samples = []  # (帧, 消费计数) 相位证据
         self.replay_edge_mismatches = []  # 原版沿 vs 文件沿（必须恒空）
+        self.replay_input_audit = NativeReplayInputAudit(self)
+        self._replay_input_log = None
+        if self.native_replay and self.replay_stage is not None:
+            self._replay_input_log = open(os.path.join(
+                self.diagnostic_dir, "battle-replay-input-audit.jsonl"), "w")
         if self.replay_stage is not None and os.environ.get("TH13_REPLAY_LOG"):
             self._replay_log = open(
-                "artifacts/tmp-scratch/battle-replay-consume.txt", "w")
+                os.path.join(self.diagnostic_dir, "battle-replay-consume.txt"), "w")
         try:
             for self.frame in range(0, frames + 900):
-                if (self.replay_stage is not None
+                if (not self.native_replay and self.replay_stage is not None
                         and self.battle_first is not None):
                     if getattr(self, "_replay_first_pending", False):
                         # 零售 scene7+0x14==0 首帧的 0x448ec0 启动写
@@ -1022,7 +1644,13 @@ class BattleOracle(TitleOracle):
                     # 战斗首帧前（标题/装载段）不消费——0x448200:14 的
                     # DAT_004c2194==0 分支即原版的"无对局不消费"语义。
                     pass
-                if self.replay_stage is not None and self.battle_first is not None:
+                if self.menu_replay and not self.battle_requested:
+                    self.frame_keys = self.input_script.get(self.frame, frozenset())
+                elif self.native_replay:
+                    # Host keys control replay fast-forward; replay input comes
+                    # from the registered 0x448e40 task, not GetKeyboardState.
+                    self.frame_keys = frozenset()
+                elif self.replay_stage is not None and self.battle_first is not None:
                     state = self.rd32(INPUT_HELD)
                     self.frame_keys = frozenset(
                         vk for bit, vk in REPLAY_INPUT_VK if state & bit)
@@ -1031,6 +1659,7 @@ class BattleOracle(TitleOracle):
                 else:
                     self.frame_keys = frozenset()
                 self.enemy_updates = 0
+                consumes_before = self.replay_consumed
                 try:
                     self.title_frame(out)
                 except (SystemExit, UcError) as exc:
@@ -1045,20 +1674,79 @@ class BattleOracle(TitleOracle):
                                        fromlist=["UC_X86_REG_ESP"])
                             .UC_X86_REG_ESP)
                         ret_chain = [self.rd32(esp + i * 4) for i in range(4)]
+                        regs = {name: self.uc.reg_read(reg) for name, reg in (
+                            ("eax", UC_X86_REG_EAX), ("ebx", UC_X86_REG_EBX),
+                            ("ecx", UC_X86_REG_ECX), ("edx", UC_X86_REG_EDX),
+                            ("esi", UC_X86_REG_ESI), ("edi", UC_X86_REG_EDI))}
                         sys.stderr.write(
                             "CRASH frame=%d: %r phase=%s EIP=%08x ESP=%08x "
-                            "stack=%s\n" % (self.frame, exc, self.phase, eip,
-                                            esp,
+                            "regs=%s stack=%s\n" % (self.frame, exc, self.phase, eip,
+                                            esp, {k: "%08x" % v for k, v in regs.items()},
                                             ["%08x" % v for v in ret_chain]))
+                        if eip == 0x00467797:
+                            vm = regs["edi"]
+                            sprite = self.rd32(vm + 0x2C)
+                            sys.stderr.write("TEXTURE-FAIL vm=%08x script=%d sprite=%08x "
+                                             "holder=%08x texture-map=%s\n" % (
+                                                 vm, self._vm_script(vm), sprite,
+                                                 self.rd32(sprite + 8) if sprite else 0,
+                                                 list(self.tex_map.values())[-4:]))
+                            sys.stderr.write("TEXTURE-FAIL stack32=%s\n" %
+                                             ["%08x" % self.rd32(esp + 4 * i) for i in range(32)])
+                            frame_pointer = self.uc.reg_read(UC_X86_REG_EBP)
+                            caller_frame = self.rd32(frame_pointer)
+                            text_arg = self.rd32(caller_frame + 0x0C)
+                            if self._mapped(text_arg):
+                                sys.stderr.write("TEXTURE-FAIL text=%s type=%08x caller_frame=%08x\n"
+                                                 % (bytes(self.uc.mem_read(text_arg, 64)).hex(),
+                                                    self.rd32(text_arg + 0x120), caller_frame))
+                            for slot in range(26):
+                                fp = self.rd32(self.anm_mgr + 0xB77B34 + slot * 4)
+                                if not fp:
+                                    continue
+                                sprites = self.rd32(fp + 0x11C)
+                                if sprites and sprite >= sprites and (sprite - sprites) % 0x48 == 0:
+                                    sys.stderr.write("TEXTURE-FAIL sprite-table slot=%d file=%08x index=%d counts110/114/118=%d/%d/%d loading=%d\n"
+                                                     % (slot, fp, (sprite - sprites) // 0x48,
+                                                        self.rd32(fp + 0x110), self.rd32(fp + 0x114),
+                                                        self.rd32(fp + 0x118), self.rd32(fp + 0x128)))
+                                count = self.rd32(fp + 0x110)
+                                base = self.rd32(fp + 0x124)
+                                if base and base <= sprite < base + count * 0x18:
+                                    sys.stderr.write("TEXTURE-FAIL entry slot=%d file=%08x index=%d\n"
+                                                     % (slot, fp, (sprite - base) // 0x18))
                         if self._dump_ring:
                             self._dump_ring()
                     except Exception as diag_error:
                         sys.stderr.write("CRASH frame=%d: %r (diag %r)\n"
                                          % (self.frame, exc, diag_error))
                     break
+                if self._menu_tape is not None and self.battle_first is None:
+                    title = self.rd32(0x004C22E0)
+                    self._menu_tape.write(json.dumps({
+                        "schema": "th13-replay-menu-input-v1",
+                        "global_frame": self.frame,
+                        "boot_seed": self.boot_seed,
+                        "held_vk": sorted(self.frame_keys),
+                        "scene": self.rd32(SCENE_CUR),
+                        "next_scene": self.rd32(SCENE_NEXT),
+                        "title_screen": self.rd32(title + 0x1C) if title else None,
+                        "title_state": self.rd32(title + 0x24) if title else None,
+                        "cursor": self.rd32(title + 0x28) if title else None,
+                        "replay_index": self.rd32(title + 0x5AA0) if title else None,
+                        "stage_cursor": self.rd32(title + 0x5AA4) if title else None,
+                    }, separators=(",", ":")) + "\n")
                 if self.enemy_updates > 1:
                     self.enemy_update_audit.append(
                         (self.frame, self.enemy_updates))
+                if (self.native_replay and self.battle_first is not None
+                        and self.frame >= self.battle_first
+                        and self.replay_consumed - consumes_before != 1
+                        and len(self.replay_edge_mismatches) < 8):
+                    self.replay_edge_mismatches.append(
+                        (self.frame - self.battle_first, "consume-count",
+                         str(self.replay_consumed - consumes_before), "",
+                         "1", "", ""))
                 if self._shot_probe is not None and self.battle_first is not None:
                     self._shot_probe_frame(self.frame - self.battle_first)
                 if (self.battle_first is None and self.rd32(SCENE_CUR) == 7
@@ -1084,11 +1772,22 @@ class BattleOracle(TitleOracle):
                                      % (self.frame, self.per_frame_ops[-1],
                                         self.battle_first))
                 if self.battle_first is not None:
-                    battle_out += 1
+                    if not self.native_replay or self.frame >= self.battle_first:
+                        battle_out += 1
                     if self.enemy_updates == 0:
                         self.enemy_update_zero_frames += 1
                     if self._state_log is not None:
                         self._write_state_sample(self.frame - self.battle_first)
+                    if self._state_v2_log is not None:
+                        from .replay_state import sample
+                        row = sample(self, self.frame - self.battle_first)
+                        self._state_v2_log.write(json.dumps(
+                            row, separators=(",", ":")) + "\n")
+                    if self._semantic_log is not None and self.frame >= self.battle_first:
+                        from .replay_state import semantic_sample
+                        row = semantic_sample(self, self.frame - self.battle_first)
+                        self._semantic_log.write(json.dumps(
+                            row, separators=(",", ":")) + "\n")
                     # 逐帧玩家轨迹落盘（死亡时间线离线分析：冻结段=死亡，
                     # 跳变回出生点=复活）。
                     if model is not None and getattr(self, "_pos_log", None):
@@ -1126,7 +1825,7 @@ class BattleOracle(TitleOracle):
                                         (battle_f, round(rx, 3), round(ry, 3),
                                          round(model.x, 3),
                                          round(model.y, 3)))
-                    if battle_out % 120 == 0:
+                    if battle_out and battle_out % 120 == 0:
                         sys.stderr.write(
                             "battle +%d (f%d) ops=%d 418e00=%d vm %d/%d "
                             "poolmalloc=%d bfile=%08x in=%08x shots=%d "
@@ -1149,9 +1848,29 @@ class BattleOracle(TitleOracle):
                 self._state_log.close()
             if getattr(self, "_replay_log", None):
                 self._replay_log.close()
+            if self._replay_input_log is not None:
+                self._replay_input_log.close()
+            if getattr(self, "_state_v2_log", None):
+                self._state_v2_log.close()
+            if getattr(self, "_semantic_log", None):
+                self._semantic_log.close()
+            if getattr(self, "_shot_probe", None):
+                self._shot_probe.close()
+            if getattr(self, "_visual_rng_trace", None):
+                self._visual_rng_trace.close()
+            if getattr(self, "_entity_log", None):
+                self._entity_log.close()
+            if getattr(self, "_texture_trace", None):
+                self._texture_trace.close()
+            if getattr(self, "_sound_trace", None):
+                self._sound_trace.close()
+            if getattr(self, "_menu_tape", None):
+                self._menu_tape.close()
         self.model_misses_out = model_misses
         self.replay_qualification = dict(
             consumed=self.replay_consumed,
+            input_frames=self.replay_input_audit.input_frames,
+            slots=dict(self.replay_input_audit.slots),
             frames_requested=frames,
             edge_mismatches=list(self.replay_edge_mismatches),
             phase_samples=list(self.replay_phase_samples[:4])
@@ -1179,18 +1898,19 @@ class BattleOracle(TitleOracle):
                             # 窗口起点=检测帧（battle_first-1，scene7 首帧
                             # 本体——零售首战斗帧对应物；授权修复：该帧无
                             # 消费属已登记绝对差一面，其余帧 bf(N)↔file(N)）
-                            if not row["ops"] or frame < (self.battle_first or 0) - 1:
+                            first_frame = (self.battle_first or 0) - (0 if getattr(self, "native_replay", False) and self.replay_stage is not None else 1)
+                            if not (len(row["ops"]) if "ops" in row else row["op_count"]) or frame < first_frame:
                                 continue
                             first = frame
                         if frame != first + count:
                             self.fail("non-contiguous battle frame %d, expected %d"
                                       % (frame, first + count))
                         row["frame"] = count
-                        n = len(row["ops"])
+                        n = len(row["ops"]) if "ops" in row else row["op_count"]
                         min_ops = min(min_ops, n) if count else n
                         max_ops = max(max_ops, n)
                         total_ops += n
-                        for op in row["ops"]:
+                        for op in row.get("ops", ()):
                             tex = op.get("tex")
                             name = tex[2] if tex else "(null)"
                             self.family_ops.setdefault(name, count)
@@ -1248,14 +1968,47 @@ def main(argv):
         elif arg == "--replay-stage":
             i += 1
             flags["--replay-stage"] = int(argv[i])
+        elif arg == "--out-dir":
+            i += 1
+            flags["--out-dir"] = argv[i]
+        elif arg == "--state-v2":
+            flags["--state-v2"] = True
+        elif arg == "--native-replay":
+            flags["--native-replay"] = True
+        elif arg == "--legacy-replay":
+            flags["--legacy-replay"] = True
+        elif arg == "--retail-loader":
+            flags["--retail-loader"] = True
+        elif arg == "--postload-replay":
+            flags["--postload-replay"] = True
+        elif arg == "--semantic-state":
+            flags["--semantic-state"] = True
+        elif arg == "--entity-events":
+            flags["--entity-events"] = True
+        elif arg == "--menu-replay":
+            flags["--menu-replay"] = True
+        elif arg == "--draw-log":
+            i += 1
+            if argv[i] not in ("on", "off"):
+                raise ValueError("--draw-log must be on or off")
+            flags["--draw-log"] = argv[i]
+        elif arg == "--boot-seed":
+            i += 1
+            flags["--boot-seed"] = int(argv[i], 0)
         else:
             positional.append(arg)
         i += 1
     exe = positional[0] if positional else "games/th13/th13.exe"
     raw_dir = positional[1] if len(positional) > 1 else "artifacts/reference/raw"
     out_path = (positional[2] if len(positional) > 2 else
+                os.path.join(flags["--out-dir"],
+                             "battle-frame-counts.jsonl" if flags.get("--draw-log") == "off"
+                             else "battle-draws.jsonl")
+                if "--out-dir" in flags else
                 "artifacts/oracle-draws/st01-draws-full.jsonl")
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    if "--out-dir" in flags:
+        os.makedirs(flags["--out-dir"], exist_ok=True)
 
     if os.path.exists(out_path):
         import stat
@@ -1265,10 +2018,37 @@ def main(argv):
             return 2
 
     oracle = BattleOracle(exe, raw_dir, out_path)
+    oracle.m.log_stubs = True
+    oracle.diagnostic_dir = flags.get("--out-dir", oracle.diagnostic_dir)
+    oracle.state_v2 = flags.get("--state-v2", False)
+    oracle.native_replay = ("--replay" in flags and
+                            not flags.get("--legacy-replay", False))
+    oracle.retail_loader = ("--replay" in flags and oracle.native_replay and
+                            not flags.get("--postload-replay", False))
+    oracle.menu_replay = flags.get("--menu-replay", False)
+    if oracle.menu_replay:
+        from .title_oracle import VK_DOWN, VK_RIGHT, VK_Z
+        oracle.input_script = {380: frozenset({VK_DOWN}), 400: frozenset({VK_DOWN}),
+                               420: frozenset({VK_DOWN}), 460: frozenset({VK_Z}),
+                               560: frozenset({VK_Z}), 650: frozenset({VK_Z})}
+        if flags.get("--replay", "").endswith("th13_udAs01.rpy"):
+            oracle.input_script[520] = frozenset({VK_RIGHT})
+    if oracle.semantic_state and "--replay" not in flags:
+        sys.stderr.write("--semantic-state requires --replay\n")
+        return 2
+    oracle.semantic_state = flags.get("--semantic-state", False)
+    oracle.entity_events = flags.get("--entity-events", False)
+    oracle.draw_log = flags.get("--draw-log", "on") != "off"
+    oracle.boot_seed = flags.get("--boot-seed", 0)
+    if not 0 <= oracle.boot_seed <= 0xFFFF:
+        sys.stderr.write("--boot-seed must be in 0..65535\n")
+        return 2
+    sys.stderr.write("BOOT-CLOCK timeGetTime=%d (synthetic)\n" % oracle.boot_seed)
     if "--replay" in flags:
         from .replayfmt import ReplayFile
         replay_path = flags["--replay"]
         data = open(replay_path, "rb").read()
+        oracle.replay_bytes = data
         oracle.replay = ReplayFile().decode(data)
         oracle._replay_file_name = os.path.basename(replay_path)
         stage_index = flags.get("--replay-stage", 0)
@@ -1276,6 +2056,9 @@ def main(argv):
             sys.stderr.write("--replay-stage out of range\n")
             return 2
         oracle.replay_stage = oracle.replay.stages[stage_index]
+        if oracle.menu_replay and (oracle._replay_file_name not in ("th13_01.rpy", "th13_udAs01.rpy") or stage_index != 0):
+            sys.stderr.write("--menu-replay input script supports th13_01 and th13_udAs01 stage index 0\n")
+            return 2
         oracle.difficulty = oracle.replay.rank & 3
         oracle.character = oracle.replay.character & 3
         oracle.shot_type = oracle.replay.shot_type
@@ -1293,11 +2076,29 @@ def main(argv):
     oracle.observe = "--observe" in flags
     started = time.time()
     oracle.run(frames=frames)
+    resource_unchanged = True
+    for path, digest in oracle.resource_reads.items():
+        try:
+            with open(path, "rb") as resource:
+                current = __import__("hashlib").sha256(resource.read()).hexdigest()
+        except OSError:
+            current = None
+        if current != digest:
+            resource_unchanged = False
+    with open(os.path.join(oracle.diagnostic_dir, "resource-identity.json"), "w") as resource_identity:
+        json.dump({"schema": "th13-oracle-resource-v1", "reads": oracle.resource_reads,
+                   "misses": sorted(oracle.resource_misses),
+                   "unchanged": resource_unchanged}, resource_identity, sort_keys=True, indent=2)
+    print("UNIMPLEMENTED-IMPORTS " + json.dumps(oracle.m.stub_calls, sort_keys=True))
     stats = oracle.cut_battle_window()
     qualification = getattr(oracle, "replay_qualification", None)
     if qualification is not None:
         # 回放沿失配进入退出码判定（capture_exit_code 同源）。
         stats["edge_mismatches"] = qualification["edge_mismatches"]
+        if oracle.native_replay and qualification["input_frames"] != frames:
+            stats["edge_mismatches"].append(
+                (-1, "input-frames", str(qualification["input_frames"]), "",
+                 str(frames), "", ""))
     print("battle-oracle battle_first=%s frames=%d crash=%s "
           "ops[min=%d max=%d total=%d] elapsed %.1fs" % (
               stats["battle_first_global"], stats["frames"], stats["crash"],
@@ -1317,13 +2118,15 @@ def main(argv):
     for name, at in families[:24]:
         print("  f%-5d %s" % (at, name))
     code = capture_exit_code(stats)
+    if not resource_unchanged:
+        code = 1
     print("CAPTURE status=%s requested_frames=%d captured_frames=%d crash=%s"
           % ("failed" if code else "complete", stats["requested_frames"],
              stats["frames"], stats["crash"]))
     if qualification is not None:
-        print("REPLAY-QUALIFICATION consumed=%d frames_requested=%d "
+        print("REPLAY-QUALIFICATION consumed=%d input_frames=%d slots=%s frames_requested=%d "
               "edge_mismatches=%d phase=%s"
-              % (qualification["consumed"], qualification["frames_requested"],
+              % (qualification["consumed"], qualification["input_frames"], qualification["slots"], qualification["frames_requested"],
                  len(qualification["edge_mismatches"]),
                  qualification["phase_samples"][:2]))
         for miss in qualification["edge_mismatches"]:

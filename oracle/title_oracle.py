@@ -306,8 +306,12 @@ class TitleOracle(RenderOracle):
                 path = os.path.join(self.raw_dir, cand)
                 if os.path.isfile(path):
                     data = open(path, "rb").read()
+                    if hasattr(self, "resource_reads"):
+                        self.record_resource(path, data)
                     break
             if data is None:
+                if hasattr(self, "resource_misses"):
+                    self.resource_misses.add(name)
                 sys.stderr.write("seam miss: %s\n" % name)
                 return 0
             buf = self.game_malloc(len(data))
@@ -595,9 +599,24 @@ class TitleOracle(RenderOracle):
         sys.stderr.write("f%d %s\n" % (self.frame, " ".join(parts)))
 
     # ---------- 主流程 ----------
+    def init_crt_fpu(self):
+        """Run the original CRT's x87 reset and default-precision setup.
+
+        The OS supplies an initialized FPU to ___tmainCRTStartup, whose
+        __cinit(1) calls __setdefaultprecision (0047bc33/0047c025/004971d5).
+        Unicorn starts with an all-zero control word instead. The CRT's own
+        _fpreset sequence at 0049f8e6 performs FNINIT followed by that same
+        original function. Stop before its separate SSE/TLS cleanup.
+        """
+        from unicorn.x86_const import UC_X86_REG_FPCW
+        self.uc.emu_start(0x0049F8E6, 0x0049F8ED, timeout=10_000_000)
+        sys.stderr.write("CRT-FPU initialized control=%04x\n" %
+                         self.uc.reg_read(UC_X86_REG_FPCW))
+
     def run(self, frames=WINDOW, total_limit=None):
         self.install_overrides()
         self.init_ptd()
+        self.init_crt_fpu()
         self.install_d3d()
         self.patch_globals_title()
         self.install_hooks()

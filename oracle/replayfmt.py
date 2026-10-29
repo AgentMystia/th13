@@ -194,8 +194,9 @@ class ReplayFile:
         (self.score,) = struct.unpack_from("<i", plain, 0x14)
         (self.slow_rate,) = struct.unpack_from("<f", plain, 0x54)
         self.stage_count = plain[0x58]
-        (self.character, self.shot_type, self.rank, self.practice_stage) = \
-            struct.unpack_from("<iiii", plain, 0x5C)
+        (self.character, self.shot_type, self.rank) = \
+            struct.unpack_from("<iii", plain, 0x5C)
+        (self.practice_stage,) = struct.unpack_from("<i", plain, 0x70)
         self.stages = []
         pos = TOP_SIZE
         for _ in range(self.stage_count):

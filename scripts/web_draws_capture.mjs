@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {validateCapture} from './submission_capture_check.mjs';
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const port = join(workspace, 'eagler-touhou/ports/th13');
+const port = resolve(process.env.TH13_WEB_PORT ?? join(workspace, 'eagler-touhou/ports/th13'));
 const runtimeDir = join(port, 'web/sdl-runtime');
 const buildDir = join(port, 'web/artifacts');
 const replaysDir = join(workspace, 'games/replays');
