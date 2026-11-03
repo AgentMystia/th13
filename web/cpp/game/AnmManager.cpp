@@ -28,7 +28,25 @@ bool AnmManager::adopt_bank(i32 id,std::unique_ptr<Bank> bank){
     bank->templates.resize(bank->data.scripts.size());
     for(u32 i=0;i<bank->templates.size();i++){auto& vm=bank->templates[i];vm.environment=&environment;vm.object_host=this;
         if(!vm.bind(bank->data,i)){error="Animation template binding failed";return false;}
-        vm.prepare_template();if(vm.tick(random,rate)<0){error="Animation template "+std::to_string(i)+": "+vm.error;return false;}
+        vm.prepare_template();
+        // 模板预热：00461bf0.c:22 在预热 tick 前置 0x8000（清 0x4000），
+        // 使预热不受暂停门影响。⚠ 证据归属（round-21 复核更正）：原版
+        // 0x46e0b0 预热链（0x405010→0x461bf0→0x462450）此后**无任何
+        // 0xc000 转换**，0x46f820 create 也只拷模板 + or 0x200，主链提交
+        // 不清位——原版模板/主链稳态是 **0x8000**，0x462450:308 暂停门
+        // 只可能命中 0x461cb0:37-38 类内嵌 VM（弹/激光体，bind 后转
+        // 0x4000）。port 在 tick 后转回 0x4000 是 BUG 8 的**有意机制
+        // 替换**（原版第三条件 GameInf+0x60 bit1 经穷尽取证恒 0——
+        // 0x4c2194 是指针，GameInf+0x60 全部 19 处写入的位全集
+        // {2,3,4,7,11,14}，无 bit1 写入、.data 零初始化，该门在 v1.00c
+        // 永不触发；原版暂停冻结是结构性的——暂停期游戏任务整表不 tick。
+        // port 单一常更新 manager 架构下以稳态 0x4000 + 门复刻同等可观测
+        // 行为：主链特效冻结、副链暂停菜单/黑幕继续）。
+        vm.visual.render_flags=(vm.visual.render_flags&~0xc000u)|0x8000u;
+        const int warmed=vm.tick(random,rate);
+        if((vm.visual.render_flags&0xc000u)==0x8000u)
+            vm.visual.render_flags=(vm.visual.render_flags&~0x8000u)|0x4000u;
+        if(warmed<0){error="Animation template "+std::to_string(i)+": "+vm.error;return false;}
     }
     banks.emplace(id,std::move(bank));return true;
 }
@@ -55,7 +73,17 @@ AnmVm* AnmManager::instantiate_preserve_ip(AnmResource& resource,i32 script){
     for(const auto& bank:banks)if(&bank.second->data==&resource){auto* vm=registry.allocate();if(bind_template_preserve_ip(*vm,bank.first,script))return vm;registry.discard(*vm);return nullptr;}
     error="Animation source resource not owned by manager";return nullptr;
 }
-bool AnmManager::initial_tick(AnmVm& vm){if(vm.tick(random,rate)<0){error=vm.error;registry.destroy_tree(vm);return false;}return true;}
+bool AnmManager::initial_tick(AnmVm& vm){
+    // 首拍必须执行（0x46f820/0x46f990/0x46fab0 的模板拷贝后立即 0x462450）：
+    // 00461bf0.c:22 在首次 tick 前置 render_flags 0x8000（清 0x4000）以绕过
+    // 暂停门，00461cb0.c:37-38 在 tick 后把仍是 0x8000 的值转回 0x4000。
+    // 否则暂停中创建的 VM（暂停菜单 ins_501 子体等）会丢掉首拍。
+    vm.visual.render_flags=(vm.visual.render_flags&~0xc000u)|0x8000u;
+    const int result=vm.tick(random,rate);
+    if((vm.visual.render_flags&0xc000u)==0x8000u)
+        vm.visual.render_flags=(vm.visual.render_flags&~0x8000u)|0x4000u;
+    if(result<0){error=vm.error;registry.destroy_tree(vm);return false;}return true;
+}
 // 0x46f820：池分配→模板复制+时间重置→0x200 活动→layer∈[0,21)→0x40000→
 // 位置（bit0 时 +320/+16）→anmArg→立即 tick→按 flags 入链（Registry::submit）。
 u32 AnmManager::create(i32 id,i32 script,i32 layer,u32 ordering,const Vec3& translation,float anm_arg,bool game_coordinates){
@@ -130,9 +158,14 @@ bool AnmManager::spawn_effect(AnmVm& vm,i32 script){if(effect)return effect(vm,s
  }
  vm.geometry.allocation_bytes=0x78;
  vm.visual.translation={};vm.visual.layer=13;
- if(script==1)vm.visual.flags=(vm.visual.flags&0xfffffe3fu)|0x20u;
+ if(script==1)vm.visual.flags=(vm.visual.flags&~0xfffffe3fu)|0x20u;
  return true;
- }error="Scene effect manager not bound";return false;}
+ }
+ // 0x402ff0 族表外 script（含 4 = 0x4bba80 表行 -1）：原版 0x415650/0x46fab0
+ // 对该输入无「错误」概念（表行 script<0 直接返回），ANM ins_508 的表外
+ // script 同降级为无几何空操作并留证——不让对局失败（Game Over 卡死同族）。
+ std::fprintf(stderr,"[scene-effect] spawn_effect unhandled script %d (no-op)\n",script);
+ return true;}
 i32 AnmManager::update_effect(AnmVm& vm,float rate){if(effect_update)return effect_update(vm,rate);if(vm.geometry.overlay)return vm.geometry.overlay->tick(random,rate);if(vm.geometry.circle){
  auto& circle=*vm.geometry.circle;if(circle.age.current>=50)return 1;
  if(circle.age.current!=circle.age.previous){
@@ -172,4 +205,25 @@ bool AnmManager::update(bool alternate){
     return true;
 }
 int AnmManager::tick_instance(AnmVm& vm){const int result=vm.tick(random,rate);if(result<0)error=vm.error;return result;}
+bool AnmManager::queue_capture(const AnmVm& vm){
+    // 0x4418b0（004418b0.c）：VM 当前精灵 → {file=VM+0x30, texture=精灵+4,
+    // src=(32,16,384,448) 战场, dst=精灵 (x,y,w,h)}。4 槽只在首字段<0 的
+    // 空槽写入，**满时丢弃新请求**（不覆盖旧槽；单帧 ≥5 个截取才可见，
+    // port 当前唯一入队点是暂停 backdrop，不可达，仍按原版对齐）。
+    if(!vm.sprite_resource||!vm.sprite)return false;
+    if(captures_.size()>=4)return false;
+    CaptureRequest request;
+    request.resource=vm.sprite_resource;
+    request.texture=u32(vm.sprite->texture);
+    request.source[0]=32;request.source[1]=16;request.source[2]=384;request.source[3]=448;
+    request.destination[0]=i32(vm.sprite->x);
+    request.destination[1]=i32(vm.sprite->y);
+    request.destination[2]=i32(vm.sprite->x+vm.sprite->width);
+    request.destination[3]=i32(vm.sprite->y+vm.sprite->height);
+    captures_.push_back(request);
+    return true;
+}
+std::vector<AnmManager::CaptureRequest> AnmManager::take_captures(){
+    auto result=std::move(captures_);captures_.clear();return result;
+}
 }

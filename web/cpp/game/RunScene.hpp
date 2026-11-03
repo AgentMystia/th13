@@ -128,6 +128,11 @@ class RunScene final : private StageDialogHost, private MsgHost, private PostGam
     std::array<FrameCallback, 3> callbacks;
     std::array<FrameCallback, 2> spell_callbacks{};
     FrameCallback laser_update{};
+    // 原版独立调度任务：0x42efb0 @ Update 24（道具）、0x438e70 @ Update 25
+    // （神霊）。二者晚于激光 Update 22、子弹 Update 23（0x40e780），是
+    // max_point 加成帧内相位的决定序（S5 f2725 根因）。
+    FrameCallback item_update{};
+    FrameCallback spirit_update{};
     struct ShakeCallback {
         RunScene& scene;
         ScreenShake effect;
@@ -142,6 +147,8 @@ class RunScene final : private StageDialogHost, private MsgHost, private PostGam
     bool start_shake(ScreenShake effect);
     std::unique_ptr<LaserPresentation> laser_presentation;
     bool update_lasers();
+    bool update_items();
+    bool update_spirits();
     std::unique_ptr<SpellPresentation> spell_presentation;
     bool update_spell();
     bool draw_spell();
@@ -231,6 +238,22 @@ public:
     bool dialog_active() const override { return dialog.active(); }
     i32 dialog_entry() const { return dialog.state().entry; }
     bool dialog_wait_released() const override { return dialog.ecl_wait_released(); }
+
+    // ECL 334 场景效果分类（0x415650 capstone 直读 + 表 0x4bba80+kind*0x18
+    // EXE .data 实读）。原版无 kind 范围检查：行 script 字段（i16@+2）<0 →
+    // 优雅空操作（0x4156a1 js → 0x4157ba 直接返回，kind4 即 -1 行）；表有效
+    // 行仅 0..6（0/1/2/3/5 = effect.anm script0 族、6 = script136）；越界
+    // kind 落 .data 邻区（kind313@0x4bd7d8 实测全零行）——原版对该输入无
+    // 「错误」概念。端口据此降级：表外 kind = 空操作 + stderr 留证，不再
+    // fail()（2026-11-03 用户 Game Over 满身疮痍界面 "Scene effect kind
+    // 313" 卡死即此）。
+    enum class SceneEffectAction { None, Effect0, Effect136 };
+    static constexpr SceneEffectAction scene_effect_action(i32 kind) noexcept {
+        return kind == 6 ? SceneEffectAction::Effect136
+                         : (kind == 0 || kind == 1 || kind == 2 || kind == 3 || kind == 5)
+                               ? SceneEffectAction::Effect0
+                               : SceneEffectAction::None;  // 4（表行 -1）与表外
+    }
 
 private:
     // MsgHost（msg opcode 回调；21 → 0x42cd40 关终了）
