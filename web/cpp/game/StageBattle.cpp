@@ -761,8 +761,12 @@ void StageBattle::fire_shots(i32 frame) {
         const u32 block = progress_ && trance_active(*progress_) ? 10u
                           : u32(level) + (focus ? 5u : 0u);
         // 临时探针（TH13_SHOT_PROBE=1）：P0 弹迹对拍（与 tools/shot_probe.py 同窗）。
-        const char* probe = std::getenv("TH13_SHOT_PROBE");
-        const bool shot_probe = probe && probe[0] == '1';
+        // 一次性静态读取：wasm 侧 getenv 恒空但每帧开火都有调用开销，缓存后
+        // 热路径只剩一次 bool 判断（WASI harness 侧环境变量语义不变）。
+        static const bool shot_probe = [] {
+            const char* probe = std::getenv("TH13_SHOT_PROBE");
+            return probe && probe[0] == '1';
+        }();
         for (const auto& record : sht_shots[block]) {
             // 0x446000:24：帧 % 间隔 == 相位才出膛（无冷却计数）。
             if (record.interval <= 0) continue;
@@ -1020,8 +1024,11 @@ float StageBattle::query_enemy_damage(StageEnemy& state, float width, float heig
     // has not advanced an integer tick (including half-speed Boss deaths).
     if (player_phase_clock_.current == player_phase_clock_.previous) return 0;
     // 临时探针（TH13_SHOT_PROBE=1）：P0 命中检测对拍（与 stage1_oracle HITCHK 同窗）。
-    const char* probe = std::getenv("TH13_SHOT_PROBE");
-    const bool shot_probe = probe && probe[0] == '1';
+    // 同上：一次性静态读取，避免逐敌机逐帧 getenv。
+    static const bool shot_probe = [] {
+        const char* probe = std::getenv("TH13_SHOT_PROBE");
+        return probe && probe[0] == '1';
+    }();
     // 0041a8a0 resolves this enemy after its ECL and before the next enemy.
     StageEnemy* enemy = &state;
     float damage = 0;
@@ -1293,6 +1300,19 @@ void StageBattle::collide_shots(StageEnemy& state) {
         (sim.bomb_active || invulnerable > 0 || (progress_ && trance_active(*progress_))))
         applied = float(i32(applied) / 5);
     if (applied <= 0) return;
+    // 0x419cce..0x419d2a（反汇编复核 tools/disas_ex_bomb_immunity.py）：猯藏
+    // EX 符卡（id 109..118）激活、bomb 对象在场（DAT_004c2170+0x40）、敌机
+    // 持有 BOSS 位（flags bit24，ECL 0x32 置位）时伤害完全豁免：跳过入命、
+    // 灵累加、命中动画与 marker，仅播音效 36（0x460c50(36, 敌机+0x27c)）。
+    // Overdrive（id 126）不在区间，bomb 伤害正常（经下方 ÷30）。命中计分
+    // 在 query 阶段已加（00419a90:121-134 早于本门），与原版一致保留。
+    // player+0x14698 bit2 排除门全二进制无写入者（死代码），不实现。
+    if (spell.active() && spell.id >= 109 && spell.id <= 118 && sim.bomb_active &&
+        (enemy->flags & 0x1000000u) != 0) {
+        if (host_ && !host_->hud_sound(36, enemy->position[0]))
+            error_ = "EX bomb immunity sound failed";
+        return;
+    }
     // 0x419a90:0x419d37-0x419d53（反汇编复核）：符卡激活
     // （DAT_004c2178+0x7c & 1）且炸弹保护位（同 flags & 0x20）时，
     // 整数伤害 idiv 30。原生 `test esi,esi` 在除法之前（0x419d2f），
@@ -1345,6 +1365,11 @@ void StageBattle::collide_shots(StageEnemy& state) {
 
 void StageBattle::explode_orb(PlayerBombOrb& orb) {
     if (!orb.active) return;
+    // 0040b2b4-0x40b2c2：珠 VM 存活门通过后先播 id27（se_tan00，EDI=0x1b，
+    // x=[ebx+4]）再消弹——几何早已移植，此声音调用此前缺失（2026-11-05
+    // Hi-Fi 全窗 sfx 对拍发现：th13_01 s3 缺 29 条/s6 缺 82 条全为 id27）。
+    if (host_ && !host_->hud_sound(27, orb.x))
+        error_ = "Reimu bomb orb explosion sound failed";
     // 40b2a0 creates the explosion registration before releasing the orb's
     // own long-lived registration; this order affects later slot allocation.
     const i32 explosion = register_circle({orb.x, orb.y, 0}, 64, 8, 11, 60);
@@ -1433,6 +1458,10 @@ void StageBattle::step_bomb() {
             if (orb.registration_slot >= 0 &&
                 damage_registrations[size_t(orb.registration_slot)].accumulated_damage >= 300) {
                 explode_orb(orb);
+                // 0040b802-0x40b812：伤害爆炸支路在（有门的）40b2a0 之外
+                // 无条件再播一次 id27——即 native 同帧 "27:2" 双发的来源。
+                if (host_ && !host_->hud_sound(27, orb.x))
+                    error_ = "Reimu bomb orb damage explosion sound failed";
                 // 40b590 registers one 45f7c0 callback per damage explosion.
                 if (reimu_explosion_shake && !reimu_explosion_shake())
                     error_ = "Reimu explosion screen shake registration failed";
@@ -1770,22 +1799,29 @@ bool StageBattle::kill_player() {
 
 bool StageBattle::commit_death() {
     sim.spell.player_hit(bomb_timer > 0);
-    // 0x444a10。死亡自动灵界保护：be808 >= 200 → 0x405a20(1)（激活位 +
-    // 保护位），玩家存活（state 1），灵界结束时 0x405b80 经 0x444a10
-    // 直接确定死亡，不再进入新的决死窗口；不满足 → 普通死亡。
-    if (!progress_ || trance_active(*progress_) ||
+    // 0x444a10:444a13-30 先过符卡练习/对话门（不调 0x405a20）→ 普通死亡。
+    // 0x444a3a call 0x405a20(1) + test eax：返回 0 = 存活（444a43 只写
+    // 0x65c=1，不扣命、timer 保留）；-1 = 普通死亡。0x405a20 有两个
+    // 返回 0 的出口：新激活（be808 >= 200，置激活位+保护位，BGM/任务钟
+    // 复位）与 already-active 早退（0x405a36 test bit0 → jne 0x405b64，
+    // xor eax,eax，bit1 与任务钟均不动）。决死窗内手动按 C 激活的灵界
+    // （0x4057f0 无 player state 门）在窗口到期时经早退出口保命且保持
+    // 手动语义：结束时正常 -200，不走 0x444a10 死亡（决死灵界）。
+    if (!progress_ ||
         (progress_->run_mode_flags & 0x30u) == 0x20u ||
-        (sim.dialog_host && sim.dialog_host->dialog_active()) ||
-        progress_->ending_points < 200) {
+        (sim.dialog_host && sim.dialog_host->dialog_active())) {
         return commit_death_normal();
     }
-    trance_protection_ = true;
-    trance_begin(*progress_);
-    item_manager.set_spirit_trance(true);
-    if (!(progress_->stage == 6 && progress_->chapter >= 6) && !host_->trance_music(true)) {
-        error_ = "Protective Trance music failed"; return false;
+    if (!trance_active(*progress_)) {
+        if (progress_->ending_points < 200) return commit_death_normal();
+        trance_protection_ = true;
+        trance_begin(*progress_);
+        item_manager.set_spirit_trance(true);
+        if (!(progress_->stage == 6 && progress_->chapter >= 6) && !host_->trance_music(true)) {
+            error_ = "Protective Trance music failed"; return false;
+        }
+        trance_task_frame_ = 0;
     }
-    trance_task_frame_ = 0;
     player_phase = PlayerPhase::Active;
     //444a10's successful405a20 path only changes state, preserving timer.
     return true;
@@ -2382,7 +2418,8 @@ bool StageBattle::step(const GameInput& input) {
     }
     // 临时探针（TH13_BOMB_PROBE=1）：Bomb 全窗逐帧对照（r4/combat 权威
     // 对拍）：age/timer/库存/无敌、8 珠态、敌 HP、存活弹数、game RNG 计数。
-    if (std::getenv("TH13_BOMB_PROBE")) {
+    static const bool bomb_probe = std::getenv("TH13_BOMB_PROBE") != nullptr;
+    if (bomb_probe) {
         std::printf("BOMB f=%d age=%d timer=%d stock=%d invuln=%d rng=%u",
                     sim.frame, bomb_age, bomb_timer, player_ ? player_->bombs : -1,
                     invulnerable, sim.random.index());
