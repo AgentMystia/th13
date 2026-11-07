@@ -340,7 +340,9 @@ void ItemManager::home_step(Item& item, const ItemCollector& player) {
 //      否则 +0x1471C..，asm 0x42ebb9）命中 → state4、追踪初速 =
 //      *(player+0x660 表+8)/3（collector.homing_speed/3）。
 void ItemManager::collect_check(Item& item, const ItemCollector& player) {
-    if (std::getenv("TH13_ITEM_DBG"))
+    // 一次性静态读取：逐道具逐帧的 getenv 死调用（wasm 侧恒空）清出热路径。
+    static const bool item_dbg = std::getenv("TH13_ITEM_DBG") != nullptr;
+    if (item_dbg)
         std::fprintf(stderr, "COLLECTCHK state=%d type=%d pos=(%g,%g) box=[%g,%g,%g,%g]\n",
                      player.state, item.type, item.x, item.y, player.box[0],
                      player.box[1], player.box[2], player.box[3]);
@@ -378,6 +380,7 @@ void ItemManager::collect_check(Item& item, const ItemCollector& player) {
         score_state.score += value / 10;
         if (score_state.score > 999999999) score_state.score = 999999999;
         ++point_items_;  // 0x4be7d8
+        ++progress.point_items;  // 同一计数进会话态（跨关累计；stage 头 +0x34 快照源）
         events_.push_back({ItemEvent::Kind::ScorePopup, value, item.x, item.y,
                            (player.y > 128.0f && item.state != 3)
                                ? 0xffffffffu : 0xffffff00u});

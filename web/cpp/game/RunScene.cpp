@@ -226,6 +226,17 @@ RunScene::RunScene(SessionState& p, HudPlayerState& player, HudScoreState& score
     };
     if (scheduler.add(spirit_update, FramePass::Update, 25) < 0)
         fail("Spirit update registration failed");
+    // 0x424f46/0x424f4b：原版 Boss HUD（0x4265a0 经 thunk 0x428280）注册于
+    // Update 0x1c=28——晚于道具(0x18=24)/神霊(0x19=25)。此前打包进
+    // RunScene::update(20) 造成同帧音序反转（th13_01 s3 f11317/11437：
+    // native 37(道具)→11(Boss警告)，web 相反；2026-11-05 全窗 sfx 对拍实证）。
+    boss_hud_update.owner = this;
+    boss_hud_update.enabled = true;
+    boss_hud_update.run = [](void* owner) -> i32 {
+        return static_cast<RunScene*>(owner)->update_boss_hud() ? 1 : 5;
+    };
+    if (scheduler.add(boss_hud_update, FramePass::Update, 28) < 0)
+        fail("Boss HUD update registration failed");
     for (auto& callback : spell_callbacks) {
         callback.owner = this;
         callback.enabled = true;
@@ -296,6 +307,7 @@ RunScene::~RunScene() {
     // 更严重的是新场景执行 update 时会调用已释放对象。
     scheduler.remove(item_update);
     scheduler.remove(spirit_update);
+    scheduler.remove(boss_hud_update);
     laser_presentation.reset(); // detach callbacks while battle.sim is alive
     battle.sim.laser_sound = {};
     for (auto& callback : callbacks) scheduler.remove(callback);
@@ -639,6 +651,7 @@ bool RunScene::start_shake(ScreenShake effect) {
 }
 
 bool RunScene::update() {
+    dialogue_update_pending_ = false;
     shakes.erase(std::remove_if(shakes.begin(),shakes.end(),[this](const auto& shake) {
         return !scheduler.contains(shake->callback);
     }),shakes.end());
@@ -699,39 +712,39 @@ bool RunScene::update() {
     // MSG21 may create the clear event below: its birth frame stays at0.
     // ECL's direct -2 clear, on the other hand, already happened above.
     hud.tick_stage_clear();
-    // 对话解释器（0x4265a0 每帧驱动：ECL 步进后同帧推进；Z 边沿 = bit0）。
-    // 推进键面（0x428ae0:122-129）：Z 持续位 0x1、Ctrl 0x200（快进）、Enter
-    // 0x80000 与 opcode 11 放行共用；持续帧数 = GameInput.duration（0x42b3f0
-    // 的 0x4e49f0+0x194+key*4 同构）。
-    if (dialog.active()) {
-        MsgAdvance advance;
-        advance.z_pressed = (input.pressed & 0x01u) != 0;
-        advance.held = input.held;
-        advance.pressed = input.pressed;
-        advance.z_frames = input.duration[0];
-        advance.ctrl_frames = input.duration[9];
-        dialog.step(advance);
-    }
-    // 原版 0x428ae0 在 update 内把 opcode 17 正文写进 text.anm 的四条 VM/
-    // 动态纹理；提交必须早于 AnmDrawSchedule 的层 26（Draw 优先级 59）。
-    if (dialog.active()) {
-        const auto& state = dialog.state();
-        const u32 rows = u32(std::min<size_t>(state.lines_meta.size(), 2));
-        for (u32 row = 0; row < rows; row++) {
-            const MsgLine& line = state.lines_meta[row];
-            if (!host.dialogue_line(i32(row), line, state.box_x, state.box_y))
-                return fail("Dialogue line " + std::to_string(row) + " submission failed");
-        }
-        if (!rows && dialogue_rows_ != 0) host.dialogue_clear();
-        dialogue_rows_ = i32(rows);
-    } else if (dialogue_rows_ != 0) {
-        host.dialogue_clear();
-        dialogue_rows_ = 0;
-    }
+    // 0x4274cc 的 MSG 步进属于 Update 28，不随 battle 在 20 执行。
+    // 只锁存推进键面；回放游标与 record_input 仍在本任务消费一次。
+    dialogue_advance_.z_pressed = (input.pressed & 0x01u) != 0;
+    dialogue_advance_.held = input.held;
+    dialogue_advance_.pressed = input.pressed;
+    dialogue_advance_.z_frames = input.duration[0];
+    dialogue_advance_.ctrl_frames = input.duration[9];
+    dialogue_update_pending_ = true;
 
     if (!presentation->sync(battle, input.held)) return fail(presentation->error());
-    // Boss HUD 每帧视图装配（HudFrameContext.boss；0x4265a0 驱动面，RunScene
-    // 装配契约）：可证字段接实值，未锚定缺口保持默认并登记，不伪造。
+    // Boss HUD（0x4265a0）已拆出为独立任务 update_boss_hud（Update 0x1c=28，
+    // 晚于道具 24/神霊 25，原版 0x424f46/0x424f4b）——视图装配随之迁移。
+    HudFrameContext frame;
+    frame.dialogue = dialog.active();
+    // 0x4265a0:85-96 灵界槽淡化状态机消费 DAT_004c22c4+0x5b8/+0x5bc 世界位
+    //（4fc0f57ce 接线，重写时丢失，2026-11-02 恢复）。
+    const Vec3 player_position{battle.player_x, battle.player_y, 0};
+    frame.player_position = &player_position;
+    hud.update(frame, host);
+    // 覆盖层/通关演出推进（0x43dbc0 行为子集 + GameInf 0x4000 路径）。
+    post_flow.update();
+    if (!post_flow.error.empty()) return fail(post_flow.error);
+    return hud.error.empty() || fail(hud.error);
+}
+
+bool RunScene::update_boss_hud() {
+    // Boss HUD 任务（原版 0x4265a0 经 0x428280 注册 Update 0x1c=28）。沿用
+    // RunScene::update 的暂停/覆盖层门——此前该面随 update 聚合执行，同门。
+    if (!error.empty()) return false;
+    if (environment.paused || (progress.scene_flags & 0x4010u) == 0x4010u ||
+        (progress.scene_flags & 0x70u)) return true;
+    // Boss HUD 每帧视图装配（0x4265a0 驱动面，RunScene 装配契约）：可证字段
+    // 接实值，未锚定缺口保持默认并登记，不伪造。
     BossFrameInput boss_view;
     boss_view.boss = battle.sim.boss();           // mgr+0x5c 槽 0
     boss_view.boss_slot_present = battle.sim.boss_slot[0] >= 0;  // 0x4265a0 门
@@ -756,18 +769,29 @@ bool RunScene::update() {
         boss_view.markers[i].frame=battle.sim.boss_markers[0][i].color;
     }
     if(!boss_view.boss)battle.sim.boss_markers[0]={}; // 4265a0 clears vacant slot ratios
-    HudFrameContext frame;
-    frame.dialogue = boss_view.dialog_active;
-    frame.boss = &boss_view; // a vacant boss slot must also retire its HUD
-    // 0x4265a0:85-96 灵界槽淡化状态机消费 DAT_004c22c4+0x5b8/+0x5bc 世界位
-    //（4fc0f57ce 接线，重写时丢失，2026-11-02 恢复）。
-    const Vec3 player_position{battle.player_x, battle.player_y, 0};
-    frame.player_position = &player_position;
-    hud.update(frame, host);
-    // 覆盖层/通关演出推进（0x43dbc0 行为子集 + GameInf 0x4000 路径）。
-    post_flow.update();
-    if (!post_flow.error.empty()) return fail(post_flow.error);
-    return hud.error.empty() || fail(hud.error);
+    if (!hud.update_boss(boss_view, host))
+        return fail(hud.error.empty() ? "Boss HUD update failed" : hud.error);
+    // 0x4265a0：Boss HUD 警告音之后，0x4274bc 仅检查对话指针，
+    // 0x4274cc 调用 MSG 解释器；不以 Boss 存在性为门。
+    if (!dialogue_update_pending_) return true;
+    dialogue_update_pending_ = false;
+    if (dialog.active()) dialog.step(dialogue_advance_);
+    // opcode 17 正文仍在本帧 Draw 层 26（优先级 59）之前提交。
+    if (dialog.active()) {
+        const auto& state = dialog.state();
+        const u32 rows = u32(std::min<size_t>(state.lines_meta.size(), 2));
+        for (u32 row = 0; row < rows; row++) {
+            const MsgLine& line = state.lines_meta[row];
+            if (!host.dialogue_line(i32(row), line, state.box_x, state.box_y))
+                return fail("Dialogue line " + std::to_string(row) + " submission failed");
+        }
+        if (!rows && dialogue_rows_ != 0) host.dialogue_clear();
+        dialogue_rows_ = i32(rows);
+    } else if (dialogue_rows_ != 0) {
+        host.dialogue_clear();
+        dialogue_rows_ = 0;
+    }
+    return error.empty();
 }
 
 void RunScene::open_dialog(i32 entry) {

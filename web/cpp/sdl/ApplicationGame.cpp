@@ -5,6 +5,7 @@
 #include "../game/RunScene.hpp"
 #include "../game/SpellPresentation.hpp"
 #include "../game/SpellElapsedTime.hpp"
+#include "../game/ResultRecord.hpp"
 
 #include <array>
 #include <algorithm>
@@ -14,10 +15,19 @@
 #include <emscripten.h>
 EM_JS(bool, th13_download_recorded_replay, (const unsigned char* bytes, int size, int slot), {
     try {
-        const blob = new Blob([HEAPU8.slice(bytes, bytes + size)], {type: 'application/octet-stream'});
+        const name = 'th13_' + String(slot).padStart(2, '0') + '.rpy';
+        const data = HEAPU8.slice(bytes, bytes + size);
+        // 持久化钩子（页面壳 th13.html / shell.mjs 注册 Module.onReplaySaved）：
+        // 录像保存除触发浏览器下载外，把同一份字节交壳落 localStorage（键
+        // th13.replays / th13.replay.<name>），页面刷新后由壳重导入 catalog。
+        // 钩子自吞异常——持久化失败不阻断下载，也不令 save_replay_slot 判失败
+        //（catalog 已由 save_replay_slot 先行 import_replay_bytes 入槽）。
+        try { Module.onReplaySaved?.(name, data); }
+        catch (error) { console.warn('[th13] onReplaySaved failed:', error); }
+        const blob = new Blob([data], {type: 'application/octet-stream'});
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a'); link.href = url;
-        link.download = 'th13_' + String(slot).padStart(2, '0') + '.rpy';
+        link.download = name;
         link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return true;
     } catch (_) { return false; }
 });
@@ -58,6 +68,12 @@ void ApplicationState::update_spell_time(bool active) {
     SpellTimeClock::End end;
     if (!spell_time_clock.end(now, end)) return;
     spell_time_packed = encode_spell_elapsed_time(end.seconds);
+    // B' 注入缝（默认关闭 = 生产实时钟语义）：端到端以原 .rpy stage 头的
+    // 同槽 dword 置换本局实时钟值（0x412ee0 取 QPC 实时，属保存时刻实时量）。
+    if (spell_time_pin_enabled_ && progress.stage >= 1 && progress.stage <= 7 &&
+        end.index >= 0 && end.index < 21) {
+        spell_time_packed = spell_time_pin_[u32(progress.stage)][u32(end.index)];
+    }
     if (replay_active || pending_replay_stage) {
         const ReplayStage* stage = pending_replay_stage;
         if (!stage) {
@@ -339,10 +355,26 @@ bool ApplicationState::result_screen_data(TitleResultScreenData& out) const {
     out.difficulty = progress.difficulty;
     out.rank = -1;
     out.current.score = selection_score.score;
-    out.current.stage = progress.stage;
+    // 0x43d6b0 写入点：+0x14=DAT_004be81c（stage）、+0x15=DAT_004be7c8（续关）、
+    // +0x28=slowdown float。0x454050 全通建面在 FUN_0043d6b0 前临时置
+    // DAT_004be81c=8（插入后复位 0）→ 标题侧全通预插行 stage 恒 8
+    // （成绩表 kStageNames[8]="Clear"；Replay 路线表 kRouteNames[8] 才是
+    // "All"）；对局内 0x43f8f0→RunPause 榜覆盖层（run 存活）仍用当前
+    // progress.stage。
+    // TitleFrame::initialize selects ResultName only for AfterEnding reason 3;
+    // other title returns must not invent a clear preview for this observer.
+    const bool clear_result = !run && title &&
+        (title->state.return_reason == 3 ||
+         title->state.screen == TitleScreen::ResultName ||
+         title->state.screen == TitleScreen::ResultReplaySlot);
+    out.current.stage = result_record_stage(clear_result, progress.stage);
     out.current.continues = progress.continues;
     out.current.timestamp = i64(std::time(nullptr));
     out.current.available = true;
+    // 0x43d6b0 +0x28 slowdown（非完成率，不得硬编码 0/100 制造虚假进度）：
+    // 与 record_result_entry 落盘共用同一表达式；原实现漏填导致预览行恒
+    // 0.0%，与 END 实际记录漂移。
+    out.current.progress_percent = result_slowdown_percent(slow_actual_, slow_budget_);
     const auto& ranking = files.ordinary_records[size_t(progress.character)]
                               .ranking[size_t(progress.difficulty)];
     for (size_t i = 0; i < out.records.size(); ++i) out.records[i] = ranking[i];
@@ -378,10 +410,29 @@ bool ApplicationState::save_replay() {
 }
 
 bool ApplicationState::save_replay_slot(i32 slot, const std::string& name) {
+    return save_replay_slot(slot, name, nullptr);
+}
+
+bool ApplicationState::save_replay_slot(i32 slot, const std::string& name,
+                                        const ReplaySaveMeta* pinned) {
     if (slot < 1 || slot > 25) return fail("Invalid replay slot");
     std::vector<u8> bytes;
-    if (!recorder.encode(bytes, name, selection_score.score))
-        return fail("Replay recording unavailable");
+    if (pinned) {
+        // 端到端注入：0x4484d0 保存时刻的可变字段由调用方钉住（date/slow/
+        // stage_field/EOF/version），事件流与 stage 头仍来自生产录制路径。
+        if (!recorder.encode(bytes, name, selection_score.score, *pinned))
+            return fail("Replay recording unavailable");
+    } else {
+        // 生产默认（A 项）：+0x54 = fps 管理器实时计数（0x424990 +0x24/+0x2c，
+        // 0x42b990 关首清零）；date=0 → encode 时刻真实时钟（0x4549d0:84）。
+        // den==0（无有效采样窗，如极短局）时 encode 内部按原语义退回事件
+        // 字节流聚合，短局行为与既往一致。
+        ReplaySaveMeta meta;
+        meta.slow_numerator = slow_num_;
+        meta.slow_denominator = slow_den_;
+        if (!recorder.encode(bytes, name, selection_score.score, meta))
+            return fail("Replay recording unavailable");
+    }
     // 0x4484d0 写 replay/th13_NN.rpy 后，原版 0x4525b0 重扫目录即可在标题
     // Replay 菜单看到；网页版没有目录重扫，这里直接走既有 import_replay_bytes
     // 入 catalog（th13_NN.rpy → 编号槽 NN-1），标题 Replay 菜单立即可选。
@@ -417,14 +468,28 @@ bool ApplicationState::change_pause_option(i32 row, i32 delta) {
     return files.save() || fail(files.error);
 }
 
-bool ApplicationState::record_result_name(const std::string& name) {
+bool ApplicationState::record_result_entry(const std::string& name, i32 stage) {
     if (replay_active || progress.practice_mode != 0) return true;
     TitlePlayerDataScore result;
-    result.score=selection_score.score; result.stage=progress.stage;
+    result.score=selection_score.score; result.stage=stage;
     result.continues=progress.continues; result.name=name;
-    result.timestamp=i64(std::time(nullptr)); result.progress_percent=0; result.available=true;
+    result.timestamp=i64(std::time(nullptr));
+    // 0x43d6b0:42-44：float@24 = 100 − 慢速率分子/分母×100（0x424990 累加
+    // 器，关首 0x42b990 清零 → 末段值）；分母为 0（无有效帧）时记 0。
+    // 与 result_screen_data 预插行共用 result_slowdown_percent（同一 slowdown
+    // 字段语义，预览=落盘）。
+    result.progress_percent = result_slowdown_percent(slow_actual_, slow_budget_);
+    result.available=true;
     files.record_high_score(progress.character, progress.difficulty, result);
     return files.save_score() || fail(files.error);
+}
+
+bool ApplicationState::record_result_name(const std::string& name) {
+    return record_result_entry(name, progress.stage);
+}
+
+bool ApplicationState::record_clear_result_name(const std::string& name) {
+    return record_result_entry(name, 8);
 }
 
 bool ApplicationState::result_needs_name() const {
@@ -435,6 +500,16 @@ bool ApplicationState::result_needs_name() const {
     const auto& ranking = files.ordinary_records[size_t(progress.character)].ranking[size_t(progress.difficulty)];
     for (const auto& entry : ranking) if (entry.score <= selection_score.score) return true;
     return false;
+}
+
+i32 ApplicationState::result_ranking(TitlePlayerDataScore rows[10]) const {
+    // 0x43f8f0：FUN_0043d6b0 当场插入新分（名字空白，END 才写名）并经
+    // 0x415030(rank) 把 0 基行写进覆盖层 +0x38。复用 result_screen_data 的
+    // 同构插入预览（不落档）。
+    TitleResultScreenData data;
+    if (!result_screen_data(data) || data.rank < 0) return -1;
+    for (size_t i = 0; i < data.records.size(); ++i) rows[i] = data.records[i];
+    return data.rank;
 }
 
 }  // namespace th13::sdl

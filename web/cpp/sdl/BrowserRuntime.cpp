@@ -5,7 +5,6 @@
 #include "ApplicationState.hpp"
 #include "../game/GameInput.hpp"
 #include "../game/GameKeyboard.hpp"
-#include "../game/Probe.hpp"
 #include "../game/ReplayEntityState.hpp"
 #include "../../../portable/sdl/FrameCadence.hpp"
 #include "../../../portable/input/TouchController.hpp"
@@ -585,11 +584,63 @@ EMSCRIPTEN_KEEPALIVE int th13_debug_ending(int character, int difficulty) {
     app->progress.continues = 0;
     app->progress.practice_mode = 0;
     app->progress.stage = 6;
+    // A diagnostic jump may originate from the title; the production Ending
+    // handoff originates from Run and therefore has no title task to retire.
+    app->title.reset();
     app->pending_destination = th13::i32(Destination::Ending);
     if (!app->apply_destination()) { last_error = app->failure; return 0; }
     clear_inputs();
     cadence.reset();
     return 1;
+}
+
+// Debug 直入 GameOver 覆盖层（仅诊断面）：走生产 0x43f570 同链
+// request_game_over()（真实 exhausted-lives 死亡的同一入口）。回放会话的
+// player game-over 改走结算A（00443240），浏览器无法自然到达本路径；
+// 与 th13_debug_ending 同为产品级验证入口——GameOver→名前录入覆盖层
+// 的绘制健康（2026-11-06 "ASCII glyph sprite unavailable: 313" 卡死回归）。
+EMSCRIPTEN_KEEPALIVE int th13_debug_game_over() {
+    using namespace th13::sdl;
+    if (!app || !app->initialized || !app->run) return 0;
+    if (!app->request_game_over()) { last_error = app->failure; return 0; }
+    return 1;
+}
+
+// 只读暂停覆盖层状态埋点（诊断面）：GameOver/名前录入验证时观察
+// screen/phase/age/名字缓冲与门控位，不参与任何生产判定。
+EMSCRIPTEN_KEEPALIVE const char* th13_debug_pause_state() {
+    using namespace th13::sdl;
+    static char report[512];
+    if (!app || !app->pause) { report[0] = 0; return report; }
+    const auto& state = app->pause->state;
+    std::snprintf(report, sizeof report,
+        "{\"screen\":%d,\"phase\":%d,\"age\":%d,\"cursor\":%d,\"menu_count\":%d,"
+        "\"can_continue\":%d,\"can_save\":%d,\"needs_name\":%d,\"name_is_result\":%d,"
+        "\"replay_slot\":%d,\"name_cursor\":%d,\"name\":\"%s\"}",
+        int(state.screen), state.phase, state.age.current, state.menu.cursor,
+        state.menu.count, int(state.can_continue), int(state.can_save_replay),
+        int(state.result_needs_name), int(state.name_is_result),
+        state.replay_slot, state.name_cursor, state.replay_name.c_str());
+    return report;
+}
+
+// Read-only result preview used by the actual title/result renderer. This
+// observer does not set score, stage, sampling counters or completion flags.
+EMSCRIPTEN_KEEPALIVE const char* th13_debug_result_state() {
+    using namespace th13::sdl;
+    static std::string report;
+    report.clear();
+    if (!app || !app->initialized) return report.c_str();
+    th13::TitleResultScreenData data;
+    if (!app->result_screen_data(data)) return report.c_str();
+    char row[256];
+    std::snprintf(row, sizeof row,
+        "{\"stage\":%d,\"slowdown\":%.9g,\"score\":%d,\"rank\":%d,"
+        "\"has_run\":%s,\"slow_actual\":%.17g,\"slow_budget\":%.17g}",
+        data.current.stage, double(data.current.progress_percent), data.current.score,
+        data.rank, app->run ? "true" : "false", app->slow_actual_, app->slow_budget_);
+    report = row;
+    return report.c_str();
 }
 
 // 确定性单帧泵：固定 1/60 步长、恰一逻辑帧 + 绘制提交，不经过 rAF 帧钟与
@@ -1468,36 +1519,6 @@ EMSCRIPTEN_KEEPALIVE const char* th13_debug_draw_report() {
     }
     return report.c_str();
 }
-// 临时探针（-96px 排查；用后即删）：置位相机/顶点预算打印 + 环境快照。
-EMSCRIPTEN_KEEPALIVE const char* th13_probe_camera(int enable) {
-    using namespace th13::sdl;
-    th13::probe::enabled = enable != 0;
-    th13::probe::budget = enable != 0 ? 1u : 0u;
-    th13::probe::probe_cam_arm(enable != 0 ? 300u : 0u);
-    static std::string report;
-    report.clear();
-    if (app) {
-        const auto& e = app->environment;
-        char line[160];
-        std::snprintf(line, sizeof line,
-                      "env offsets={%d,%d,%d,%d} screen=%ux%u raster=%.3f res=%.3f\n",
-                      e.screen_offsets[0], e.screen_offsets[1], e.screen_offsets[2],
-                      e.screen_offsets[3], e.screen_width, e.screen_height,
-                      double(e.raster_scale), double(e.resolution_scale));
-        report += line;
-        for (th13::u32 i = 0; i < 4; i++) {
-            const auto& v = app->views.view(th13::DrawCamera(i));
-            std::snprintf(line, sizeof line,
-                          "view[%u] vp={%u,%u,%u,%u} view12=%.4f view13=%.4f proj0=%.9g\n", i,
-                          v.viewport.x, v.viewport.y, v.viewport.width, v.viewport.height,
-                          double(v.camera.view.m[12]), double(v.camera.view.m[13]),
-                          double(v.camera.projection.m[0]));
-            report += line;
-        }
-    }
-    return report.c_str();
-}
-
 // Production submission trace v2, NOT legacy draw-v1. Each present completes
 // one frame. Consumers must validate schema and the successful end frame count.
 EMSCRIPTEN_KEEPALIVE int th13_debug_capture_begin(const char* path) {

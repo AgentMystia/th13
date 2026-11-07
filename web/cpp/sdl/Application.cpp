@@ -5,6 +5,7 @@
 #include "StageTransitionClock.hpp"
 #include "game/TitleFrame.hpp"
 #include "game/VisualBootstrap.hpp"
+#include "game/ReplayFastForward.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -521,6 +522,34 @@ bool ApplicationState::initialize(bool device) {
     };
     if (scheduler.add(fps_text_draw, FramePass::Draw, 77) < 0)
         return fail("FPS text draw callback registration failed");
+    replay_fast_forward.owner = this;
+    replay_fast_forward.enabled = true;
+    replay_fast_forward.run = [](void* p) -> i32 {
+        auto& app = *static_cast<ApplicationState*>(p);
+        if (!app.run || !app.replay_active || !app.physical_input ||
+            app.pending_destination >= 0) return 1;
+        app.restart_update = replay_fast_forward_restart(app.physical_input->held,
+            app.replay_consumed, app.replay_consumed != app.replay_pass_start,
+            app.environment.paused, app.progress.scene_flags, app.replay_finished);
+        // Stop before the late ANM chain (34). step() restarts the whole
+        // Update pass, including the application-owned stage-transition clocks.
+        return app.restart_update ? 3 : 1;
+    };
+    if (scheduler.add(replay_fast_forward, FramePass::Update, 30) < 0)
+        return fail("Replay fast-forward callback registration failed");
+    ending_update.owner = this;
+    ending_update.enabled = true;
+    ending_update.run = [](void* p) -> i32 {
+        auto& app = *static_cast<ApplicationState*>(p);
+        if (!app.ending || !app.physical_input) return 1;
+        if (!app.ending->update(*app.physical_input)) return 5;
+        app.restart_update = app.pending_destination < 0 &&
+                             app.ending->should_restart(*app.physical_input);
+        return app.restart_update ? 3 : 1;
+    };
+    // 00416190 sets EBX=0x1f before registering 004166b0 -> 00416610.
+    if (scheduler.add(ending_update, FramePass::Update, 31) < 0)
+        return fail("Ending update callback registration failed");
     initialized = true;
     return begin_title(0);
 }
@@ -534,6 +563,8 @@ ApplicationState::~ApplicationState() {
     }
     release_run();
     scheduler.remove(loading_battle_draw);
+    scheduler.remove(replay_fast_forward);
+    scheduler.remove(ending_update);
     for (auto& callback : animation_updates) scheduler.remove(callback);
     display.reset();
     animations.resource_release = nullptr;
@@ -794,6 +825,10 @@ bool ApplicationState::begin_run() {
     if (!replay_session) {
         if (new_run && !recorder.start(ReplayRecorder::top_snapshot(progress)))
             return fail("Replay recording initialization failed");
+        // B' 端到端注入缝（默认关闭 = 生产 top_snapshot 语义）：顶层头未映射
+        // 域 verbatim 预置，encode 仍按生产语义覆写已名字段。
+        if (new_run && replay_top_pin_enabled_ && replay_top_pin_.size() == 0x74)
+            recorder.start(replay_top_pin_);
         if (!begin_record_stage()) return false;
     }
     if (!run->initialize(HudEntryContext{0, new_run, title_flow_ran})) return fail(run->error);
@@ -806,7 +841,20 @@ bool ApplicationState::begin_run() {
             return fail("Next-stage loading caption release: " + animations.error);
     }
     if (!replay_session) run->record_input = [this](const GameInput& input) {
-        if (!recorder.record(input, 0)) fail("Replay input recording failed");
+        // 录像 slow 事件字节（0x4484d0；回放 FPS 显示直读该流）：取最近
+        // 1s 采样窗的整数 fps，正常 60 → 恒 60 字节（slow rate 0%）。
+        const u8 slow = u8(std::min(255.0f, std::max(0.0f, slow_window_fps_ + 0.5f)));
+        // D-fix（0x448ec0 关首输入沿复位）：关内首帧按复位语义落盘
+        // （pressed = 全量 held、released = 0），与真机五处关界实录一致。
+        if (record_edge_reset_pending_) {
+            record_edge_reset_pending_ = false;
+            GameInput reset = input;
+            reset.pressed = u32(reset.held);
+            reset.released = 0;
+            if (!recorder.record(reset, slow)) fail("Replay input recording failed");
+            return;
+        }
+        if (!recorder.record(input, slow)) fail("Replay input recording failed");
     };
     if (replay_session) {
         int restore_player_first = 1;
@@ -888,9 +936,31 @@ bool ApplicationState::begin_run() {
 }
 
 bool ApplicationState::begin_record_stage() {
-    const auto header = ReplayRecorder::stage_snapshot(progress, selection_player, selection_score,
+    // 0x42b990 关首清零慢速率累加器：结算百分比/回放 slow% 反映本段关卡。
+    reset_slow_rate();
+    // 0x448ec0 关首清输入沿结构：关内 frame 0 按 pressed=held 复位语义录制。
+    record_edge_reset_pending_ = true;
+    auto header = ReplayRecorder::stage_snapshot(progress, selection_player, selection_score,
         game_random.seed(), run_player ? run_player->fixed_x : 0,
         run_player ? run_player->fixed_y : 51200, run_player && run_player->focus);
+    // D-fix（0x4be7d8 → stage 头 +0x34）：0x449070 恢复域 22 dword 之一的
+    // 点道具取得计数。原版 0x42e380:227 逐点道具 +1（FUN_00413bf0 得分尾同
+    // 拍），跨关累计；stage_snapshot 尚未覆盖该偏移，在此补写快照源。
+    if (header.size() >= 0x38) {
+        const u32 point_items = u32(progress.point_items);
+        for (int i = 0; i < 4; ++i) header[0x34 + i] = u8(point_items >> (8 * i));
+    }
+    // D-fix 2（符卡经过时间区 +0x70..+0xC3 预填）：0x412ee0 只写实际出场
+    // 符卡的槽，其余槽在原版首关承接 be7b8 块的堆底噪声（含 +0xC0 尾
+    // dword），属不可再现快照 → pin enabled 时整区 verbatim 预填；实测槽
+    // 随后由 update_spell_time 的同值 pin 覆盖。pin 关闭（生产）零行为变化。
+    if (spell_time_pin_enabled_ && header.size() >= 0xC4 && progress.stage >= 1 &&
+        progress.stage <= 7) {
+        const auto& slot = spell_time_pin_[u32(progress.stage)];
+        for (int k = 0; k < 21; ++k)
+            for (int b = 0; b < 4; ++b)
+                header[size_t(0x70 + k * 4 + b)] = u8(u32(slot[k]) >> (8 * b));
+    }
     return recorder.begin_stage(header) || fail("Replay stage recording failed");
 }
 
@@ -1175,9 +1245,7 @@ bool ApplicationState::complete_loading() {
     return true;
 }
 
-bool ApplicationState::step(const GameInput& input, float fps, bool lost_focus) {
-    if (!initialized || exiting || !failure.empty()) return false;
-    if (!complete_loading()) return false;
+bool ApplicationState::update_scene_pass(const GameInput& input) {
     bool loaded_transition = false;
     if (stage_transition_loading) {
         if (!prepare_next_stage()) return false;
@@ -1259,15 +1327,6 @@ bool ApplicationState::step(const GameInput& input, float fps, bool lost_focus) 
                                                                            : title->frame.error
                                                 : title->error);
     } else if (run) {
-        if (pause) {
-            if (pause->active()) {
-                pause->controls({input.pressed, input.repeated, lost_focus});
-            } else if (input.pressed & 0x100) {  // Esc：暂停覆盖层
-                if (!pause->open(PauseEntrance::Pause)) return fail(pause->error);
-            } else if (lost_focus) {
-                if (!pause->open(PauseEntrance::Pause)) return fail(pause->error);
-            }
-        }
         const i32 previous_stage_frame = progress.stage_frame;
         run->controls(input);  // 战斗输入（Z 射击/X 炸弹/方向）：唯一实例直通 StageBattle
         if (scheduler.update() < 0)
@@ -1279,11 +1338,10 @@ bool ApplicationState::step(const GameInput& input, float fps, bool lost_focus) 
             ordinary_records_dirty = true;
         }
     } else if (ending) {
-        // Ending 场景帧（0x416610 → 0x416a10）：物理输入驱动对话推进/快进
-        //（0x4e49f0/0x4e49fc/0x4e4b04 语义见 EndingScene）；动画调度器照常
-        // 推进（op7/op8 cue 的 ANM VM 属同一 registry）。
-        if (!ending->update(input)) return fail(ending->error);
-        if (scheduler.update() < 0) return fail(animations.error);
+        // Ending runs at original Update 31; its return-6 cadence restarts
+        // the pass before the late ANM chain, rather than skipping just text.
+        if (scheduler.update() < 0)
+            return fail(ending->error.empty() ? animations.error : ending->error);
         if (!graphics.select_target(nullptr, 0) ||
             !graphics.clear_target(0xff000000, nullptr))
             return fail(graphics.error);
@@ -1300,12 +1358,59 @@ bool ApplicationState::step(const GameInput& input, float fps, bool lost_focus) 
             {&progress, &selection_player, &selection_score, &game_random, &visual}, log, error))
             return fail(error);
     }
+    return true;
+}
+
+bool ApplicationState::step(const GameInput& input, float fps, bool lost_focus) {
+    if (!initialized || exiting || !failure.empty()) return false;
+    if (!complete_loading()) return false;
+    // Physical menu edges are sampled once per presented frame, not again
+    // when Replay/Ending asks to restart the simulation Update pass.
+    if (run && pause) {
+        if (pause->active()) pause->controls({input.pressed, input.repeated, lost_focus});
+        else if ((input.pressed & 0x100u) || lost_focus)
+            if (!pause->open(PauseEntrance::Pause)) return fail(pause->error);
+    }
+    physical_input = &input;
+    do {
+        restart_update = false;
+        replay_pass_start = replay_consumed;
+        if (!update_scene_pass(input)) {
+            physical_input = nullptr;
+            return false;
+        }
+        // Scene handoffs finish the normal draw/loading boundary first.
+    } while (restart_update && pending_destination < 0);
+    physical_input = nullptr;
     ending_fades.erase(std::remove_if(ending_fades.begin(), ending_fades.end(),
         [this](const auto& fade) { return !scheduler.contains(fade->update); }), ending_fades.end());
     audio_device.update();
     if (!audio_device.error.empty()) return fail(audio_device.error);
     frames++;
-    if (run) last_fps_ = fps;
+    if (run) {
+        last_fps_ = fps;
+        // 0x424990 慢速率窗：每 tick 计帧，≥1s 结算一次；游戏态有效
+        //（未暂停/无覆盖层/非装载，原生 0x4c2194+0x60&0x14 门）才计入
+        // 分母 60.0 与分子（fps≤57 计实际值，否则 60.0）。
+        if (fps > 0.0f) slow_window_time_ += 1.0 / fps;
+        ++slow_window_frames_;
+        if (slow_window_time_ >= 1.0) {
+            const float window_fps =
+                float(double(slow_window_frames_) / slow_window_time_);
+            slow_window_fps_ = window_fps;
+            if (!environment.paused && !(progress.scene_flags & 0x14u) &&
+                !loading_waiting()) {
+                slow_budget_ += 60.0;
+                slow_actual_ += window_fps <= 57.0f ? double(window_fps) : 60.0;
+                // 0x424990:37-50：同一游戏态门内的 fps 管理器计数（+0x24/+0x2c），
+                // save_replay_slot 默认 ReplaySaveMeta 的实时慢速率来源。
+                slow_num_ += window_fps <= 57.0f ? double(window_fps) : 60.0;
+                slow_den_ += 60.0;
+            }
+            slow_window_time_ = 0.0;
+            slow_window_frames_ = 0;
+        }
+    }
     if (pause && !pause->draw_overlay(static_cast<RunSceneServices&>(*this))) return fail(pause->error);
     if (!display->draw()) return fail(display->error);
     if (pending_destination == i32(Destination::Run) || pending_destination == i32(Destination::Ending)) {
