@@ -219,10 +219,15 @@ bool ApplicationState::bomb_hud(i32 stock, i32 pieces) {
 bool ApplicationState::game_over() {
     // 0043f570: mode0 → 0xe (GameOver/continue, script 142); mode≠0 → 0x18
     // (BGameOver, script 147, three items, default cursor 2, no Continue).
+    game_over_music = audio_device.music_filename();
+    game_over_music_cursor = audio_device.statistics().music_cursor;
     const bool results_menu = (progress.run_mode_flags & 0x30u) != 0;
-    return pause && pause->open(results_menu ? PauseEntrance::BGameOver
-                                             : PauseEntrance::GameOver) ||
-           fail(pause ? pause->error : "Game-over menu has no owner");
+    if (!pause || !pause->open(results_menu ? PauseEntrance::BGameOver
+                                          : PauseEntrance::GameOver))
+        return fail(pause ? pause->error : "Game-over menu has no owner");
+    // 0043f69b: select Player's Score after activating the Game Over overlay.
+    // The play request also releases the stage music's paused state.
+    return audio_device.queue_music(2, -1, "th128_08.wav") || fail(audio_device.error);
 }
 
 bool ApplicationState::request_pause() {
@@ -314,6 +319,12 @@ bool ApplicationState::continue_run() {
     // 43fa90 state 0x15, cursor 0: continue in place, not a new run.
     if (!run || progress.continue_stock <= 0) return fail("Continue unavailable");
     if (progress.stage == 7) return restart_run();
+    // 00440772..0044079b: restore the saved stage track and playback position.
+    if (!game_over_music.empty() &&
+        (!audio_device.queue_music(2, -1, game_over_music) ||
+         !audio_device.finish_music_requests() ||
+         !audio_device.seek_music_frames(game_over_music_cursor)))
+        return fail(audio_device.error);
     selection_player.extra_lives = 2;
     selection_player.life_pieces = 0;
     selection_player.bombs = 2;
