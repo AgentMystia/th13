@@ -89,7 +89,8 @@ bool RunPause::draw_overlay(HudDrawServices& sink) {
         if (state.name_is_result) {
             if (rank < 0) return fail("Result rank unavailable for name entry");
             // 0x43de80 case 0x13：头部 (48,64) → 名字行 (75,96+rank*18)+黄 _ →
-            // 榜 10 行 (48,96+18i) 高亮=rank 黄 0xffffff00、余 0xff808180。
+            // 榜 10 行 (48,96+18i) 高亮=rank 黄 0xffffff00、余 0xff808180
+            //（0x43e1bd：y = rank*18.0(0x4aeb30) + 96.0(0x4aecc0)，与榜行同基）。
             if (!put(48, 64, 0xffffffffu, "            Score Ranking!!")) return false;
             for (i32 i = 0; i < 10; ++i)
                 if (!put(48, 96.f + 18.f * i,
