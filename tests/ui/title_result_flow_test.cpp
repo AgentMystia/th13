@@ -43,6 +43,7 @@ struct ResultHost final : TitleScenePlatform {
     std::vector<i32> saved_slots;
     std::vector<std::string> saved_names;
     std::vector<i32> sounds;
+    std::vector<std::string> music;
     std::vector<HudTextDraw> texts;
     bool provide_result_data = false;
     TitleResultScreenData result_data;
@@ -53,7 +54,10 @@ struct ResultHost final : TitleScenePlatform {
     }
 
     bool clear_title_overlay() override { return true; }
-    bool queue_title_music(i32, i32, const std::string&) override { return true; }
+    bool queue_title_music(i32, i32, const std::string& name) override {
+        music.push_back(name);
+        return true;
+    }
     bool clear_current_wave() override { return true; }
     bool title_exit(i32) override { return true; }
     bool fade_out_title_music() override { return true; }
@@ -178,11 +182,13 @@ TEST(result_name_confirm_records_typed_name_then_returns_main_without_replay) {
     CHECK_EQ(i32(h.scene->state.screen), i32(TitleScreen::ResultName));
     CHECK_EQ(h.scene->state.substate, 3);
     CHECK(h.scene->state.handles[107] != 0);  // case3 age<=5：面未收
+    CHECK(h.host.music.empty());
     h.advance(7);  // case3 age>5 才 retire + 回主菜单
     CHECK_EQ(i32(h.scene->state.screen), i32(TitleScreen::Main));
     CHECK_EQ(h.scene->state.handles[107], 0u);
     CHECK(h.host.saved_slots.empty());
     CHECK_EQ(h.scene->state.return_reason, 1);
+    CHECK_EQ(h.host.music, std::vector<std::string>{"th13_00.wav"});
 }
 
 TEST(result_name_grid_uses_original_layout_and_special_glyph_bytes) {
@@ -319,6 +325,7 @@ TEST(result_replay_slot_cancel_returns_main_without_saving) {
     CHECK_EQ(i32(h.scene->state.screen), i32(TitleScreen::Main));
     CHECK(h.host.saved_slots.empty());
     CHECK(h.host.saved_names.empty());
+    CHECK_EQ(h.host.music, std::vector<std::string>{"th13_00.wav"});
 }
 
 TEST(result_original_ten_rows_keep_current_name_columns_blank) {

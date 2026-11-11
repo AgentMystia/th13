@@ -214,14 +214,20 @@ bool PauseMenu::update(u32 pressed, u32 repeated) {
     case 18: { // Name entry, up to eight characters.
         if (age <= 9) break;
         constexpr i32 count = 91;
+        const i32 previous_cursor = state.name_cursor;
         if ((pressed | repeated) & 0x10) state.name_cursor=(state.name_cursor+count-13)%count;
         if ((pressed | repeated) & 0x20) state.name_cursor=(state.name_cursor+13)%count;
         if ((pressed | repeated) & 0x40) state.name_cursor=(state.name_cursor+(state.name_cursor%13 == 0 ? 12 : count-1))%count;
         if ((pressed | repeated) & 0x80) state.name_cursor=(state.name_cursor+(state.name_cursor%13 == 12 ? count-12 : 1))%count;
+        if (state.name_cursor != previous_cursor && !host.sound(10)) return false;
         if (pressed & 0x80001) {
             if (state.name_cursor == 89) {
-                if (!state.replay_name.empty()) state.replay_name.pop_back();
+                if (!state.replay_name.empty()) {
+                    state.replay_name.pop_back();
+                    if (!host.sound(7)) return false;
+                }
             } else if (state.name_cursor == 90) {
+                if (!host.sound(7)) return false;
                 if (state.name_is_result) {
                     // LAB_00440520（0x43fa90 态 0x13 END 路径）：录入完成才建
                     // 菜单脚本 142（进榜路径 open() 延迟未建）→ 态 0xf 续关菜单。
@@ -244,9 +250,13 @@ bool PauseMenu::update(u32 pressed, u32 repeated) {
                 if (state.replay_name.size() < 8) state.replay_name += ch;
                 else state.replay_name[7]=ch;
                 if (state.replay_name.size() >= 8) state.name_cursor=90;
+                if (!host.sound(7)) return false;
             }
         } else if (pressed & 0x102) {
-            if (!state.replay_name.empty()) state.replay_name.pop_back();
+            if (!state.replay_name.empty()) {
+                state.replay_name.pop_back();
+                if (!host.sound(9)) return false;
+            }
             // 0x43fa90 态 0x13：空名 Esc 原地不动（rank>=0 无 LAB_00440520 旁路）；
             // 回放保存名前录入（A 机态 10）才退回选槽。
             else if (!state.name_is_result) phase(17);
