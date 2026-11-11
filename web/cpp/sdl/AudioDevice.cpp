@@ -635,7 +635,6 @@ std::string AudioDevice::music_filename() const {
     const auto* track = impl ? impl->layout.track(impl->track) : nullptr;
     return track ? track->filename : std::string{};
 }
-
 AudioDevice::Statistics AudioDevice::statistics() const {
     const auto& a = *impl; auto s = a.stats;
     s.music_cursor = a.music_cursor; s.track = a.track;

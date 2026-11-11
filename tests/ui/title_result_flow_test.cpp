@@ -182,12 +182,13 @@ TEST(result_name_confirm_records_typed_name_then_returns_main_without_replay) {
     CHECK_EQ(i32(h.scene->state.screen), i32(TitleScreen::ResultName));
     CHECK_EQ(h.scene->state.substate, 3);
     CHECK(h.scene->state.handles[107] != 0);  // case3 age<=5：面未收
-    CHECK(h.host.music.empty());
+    CHECK(h.host.music.empty());  // 结算屏停留期不换曲（Player's Score 不退场）
     h.advance(7);  // case3 age>5 才 retire + 回主菜单
     CHECK_EQ(i32(h.scene->state.screen), i32(TitleScreen::Main));
     CHECK_EQ(h.scene->state.handles[107], 0u);
     CHECK(h.host.saved_slots.empty());
     CHECK_EQ(h.scene->state.return_reason, 1);
+    // 0x454658：回主菜单重选标题曲 th13_00。
     CHECK_EQ(h.host.music, std::vector<std::string>{"th13_00.wav"});
 }
 
@@ -325,6 +326,7 @@ TEST(result_replay_slot_cancel_returns_main_without_saving) {
     CHECK_EQ(i32(h.scene->state.screen), i32(TitleScreen::Main));
     CHECK(h.host.saved_slots.empty());
     CHECK(h.host.saved_names.empty());
+    // 0x454f0b：槽屏取消回主菜单同样重选标题曲 th13_00。
     CHECK_EQ(h.host.music, std::vector<std::string>{"th13_00.wav"});
 }
 
