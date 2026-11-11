@@ -81,6 +81,7 @@ public:
     bool mix(float* stereo, u32 frames);
     bool seek_music_frames(u32 frame);
     Statistics statistics() const;
+    std::string music_filename() const;
     // Original voice+0x10 (averaged milli-pan from 0x460dd0) and the
     // attenuation fixed by 0x4613c0 at this ID's last start. Diagnostics for
     // PCM tests and traces; invalid IDs return 0.
